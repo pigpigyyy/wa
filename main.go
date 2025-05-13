@@ -25,52 +25,50 @@ func buildApp(input string) (err error) {
 		return fmt.Errorf("%q not found", input)
 	}
 
-	outfile := filepath.Join(input, "init.wasm")
-
 	// 构建目录
-	{
-		if !appbase.IsNativeDir(input) {
-			return fmt.Errorf("%q is not valid output path", outfile)
-		}
-
-		// 尝试读取模块信息
-		manifest, err := config.LoadManifest(nil, input)
-		if err != nil {
-			return fmt.Errorf("%q is invalid wa moudle", input)
-		}
-
-		manifest.Pkg.Target = config.WaOS_wasi
-
-		if err := manifest.Valid(); err != nil {
-			return fmt.Errorf("%q is invalid wa module; %v", input, err)
-		}
-
-		// 编译出 wat 文件
-		_, _, watOutput, err := buildWat(input)
-		if err != nil {
-			return err
-		}
-
-		watOutput, err = watutil.WatStrip(input, watOutput)
-		if err != nil {
-			return err
-		}
-
-		// wat 编译为 wasm
-		wasmBytes, err := watutil.Wat2Wasm(input, watOutput)
-		if err != nil {
-			return fmt.Errorf("wat2wasm %s failed: %v", input, err)
-		}
-
-		// wasm 写到文件
-		err = os.WriteFile(outfile, wasmBytes, 0666)
-		if err != nil {
-			return fmt.Errorf("write %s failed: %v", outfile, err)
-		}
-
-		// OK
-		return nil
+	if !appbase.IsNativeDir(input) {
+		return fmt.Errorf("%q is not valid input path", input)
 	}
+
+	// 尝试读取模块信息
+	manifest, err := config.LoadManifest(nil, input)
+	if err != nil {
+		return fmt.Errorf("%q is invalid wa moudle", input)
+	}
+
+	outfile := filepath.Join(input, manifest.Pkg.Name + ".wasm")
+
+	manifest.Pkg.Target = config.WaOS_wasi
+
+	if err := manifest.Valid(); err != nil {
+		return fmt.Errorf("%q is invalid wa module; %v", input, err)
+	}
+
+	// 编译出 wat 文件
+	_, _, watOutput, err := buildWat(input)
+	if err != nil {
+		return err
+	}
+
+	watOutput, err = watutil.WatStrip(input, watOutput)
+	if err != nil {
+		return err
+	}
+
+	// wat 编译为 wasm
+	wasmBytes, err := watutil.Wat2Wasm(input, watOutput)
+	if err != nil {
+		return fmt.Errorf("wat2wasm %s failed: %v", input, err)
+	}
+
+	// wasm 写到文件
+	err = os.WriteFile(outfile, wasmBytes, 0666)
+	if err != nil {
+		return fmt.Errorf("write %s failed: %v", outfile, err)
+	}
+
+	// OK
+	return nil
 }
 
 func buildWat(filename string) (
