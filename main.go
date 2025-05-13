@@ -1,119 +1,127 @@
-// 版权 @2019 凹语言 作者。保留所有权利。
-
-//go:build !wasm
-// +build !wasm
-
-// 凹语言, The Wa Programming Language.
 package main
 
 import (
 	"fmt"
 	"os"
-	"strings"
+	"path/filepath"
+	"unsafe"
 
-	"wa-lang.org/wa/internal/3rdparty/cli"
-	"wa-lang.org/wa/internal/app/appast"
 	"wa-lang.org/wa/internal/app/appbase"
-	"wa-lang.org/wa/internal/app/appbuild"
-	"wa-lang.org/wa/internal/app/appcir"
-	"wa-lang.org/wa/internal/app/appdap"
-	"wa-lang.org/wa/internal/app/appdev"
-	"wa-lang.org/wa/internal/app/appdoc"
-	"wa-lang.org/wa/internal/app/appfmt"
-	"wa-lang.org/wa/internal/app/appgo2wa"
-	"wa-lang.org/wa/internal/app/appinit"
-	"wa-lang.org/wa/internal/app/applex"
-	"wa-lang.org/wa/internal/app/applogo"
-	"wa-lang.org/wa/internal/app/applsp"
-	"wa-lang.org/wa/internal/app/appplay"
-	"wa-lang.org/wa/internal/app/apprun"
-	"wa-lang.org/wa/internal/app/appssa"
-	"wa-lang.org/wa/internal/app/apptest"
-	"wa-lang.org/wa/internal/app/appwat2c"
-	"wa-lang.org/wa/internal/app/appwat2wasm"
-	"wa-lang.org/wa/internal/app/appwatstrip"
-	"wa-lang.org/wa/internal/app/appyacc"
+	"wa-lang.org/wa/internal/backends/compiler_wat"
 	"wa-lang.org/wa/internal/config"
-	"wa-lang.org/wa/internal/version"
+	"wa-lang.org/wa/internal/format"
+	"wa-lang.org/wa/internal/loader"
+	"wa-lang.org/wa/internal/wat/watutil"
 )
 
-func main() {
-	cliApp := cli.NewApp()
-	cliApp.Name = "Wa"
-	cliApp.Usage = "Wa is a tool for managing Wa source code."
-	cliApp.Copyright = "Copyright 2018 The Wa Authors. All rights reserved."
-	cliApp.Version = version.Version
-	cliApp.EnableBashCompletion = true
-	cliApp.HideHelpCommand = true
+/*
+#include <stdlib.h>
+*/
+import "C"
 
-	cliApp.CustomAppHelpTemplate = cli.AppHelpTemplate +
-		"\nSee \"https://wa-lang.org\" for more information.\n"
-
-	cliApp.Flags = []cli.Flag{
-		&cli.BoolFlag{
-			Name:    "debug",
-			Aliases: []string{"d"},
-			Usage:   "set debug mode",
-		},
-		&cli.StringFlag{
-			Name:    "trace",
-			Aliases: []string{"t"},
-			Usage:   "set trace mode (*|app|compiler|loader)",
-		},
+func buildApp(input string) (err error) {
+	// 路径是否存在
+	if !appbase.PathExists(input) {
+		return fmt.Errorf("%q not found", input)
 	}
 
-	cliApp.Before = func(c *cli.Context) error {
-		if c.Bool("debug") {
-			config.SetDebugMode()
+	outfile := filepath.Join(input, "init.wasm")
+
+	// 构建目录
+	{
+		if !appbase.IsNativeDir(input) {
+			return fmt.Errorf("%q is not valid output path", outfile)
 		}
-		if parten := c.String("trace"); parten != "" {
-			config.SetEnableTrace(parten)
+
+		// 尝试读取模块信息
+		manifest, err := config.LoadManifest(nil, input)
+		if err != nil {
+			return fmt.Errorf("%q is invalid wa moudle", input)
 		}
+
+		manifest.Pkg.Target = config.WaOS_wasi
+
+		if err := manifest.Valid(); err != nil {
+			return fmt.Errorf("%q is invalid wa module; %v", input, err)
+		}
+
+		// 编译出 wat 文件
+		_, _, watOutput, err := buildWat(input)
+		if err != nil {
+			return err
+		}
+
+		watOutput, err = watutil.WatStrip(input, watOutput)
+		if err != nil {
+			return err
+		}
+
+		// wat 编译为 wasm
+		wasmBytes, err := watutil.Wat2Wasm(input, watOutput)
+		if err != nil {
+			return fmt.Errorf("wat2wasm %s failed: %v", input, err)
+		}
+
+		// wasm 写到文件
+		err = os.WriteFile(outfile, wasmBytes, 0666)
+		if err != nil {
+			return fmt.Errorf("write %s failed: %v", outfile, err)
+		}
+
+		// OK
 		return nil
 	}
-
-	// 没有参数时显示 help 信息
-	cliApp.Action = func(c *cli.Context) error {
-		if c.NArg() > 0 {
-			if c.NArg() == 1 && appbase.HasExt(c.Args().First(), ".wa", ".wat", ".wasm") {
-				return apprun.CmdRunAction(c)
-			}
-			fmt.Println("unknown command:", strings.Join(c.Args().Slice(), " "))
-			os.Exit(1)
-		}
-		cli.ShowAppHelpAndExit(c, 0)
-		return nil
-	}
-
-	cliApp.Commands = []*cli.Command{
-		// 用于调试(隐藏)
-		appdev.CmdDev,
-
-		// 用户可见子命令
-		appplay.CmdPlay,
-		appinit.CmdInit,
-		appbuild.CmdBuild,
-		apprun.CmdRun,
-		appfmt.CmdFmt,
-		apptest.CmdTest,
-		applsp.CmdLsp,
-		appyacc.CmdYacc,
-		applogo.CmdLogo,
-
-		// 开发者用于测试(隐藏)
-		applex.CmdLex,
-		appast.CmdAst,
-		appssa.CmdSsa,
-		appwat2wasm.CmdWat2wasm,
-		appwatstrip.CmdWatStrip,
-		appwat2c.CmdWat2c,
-
-		// 待完善的子命令(隐藏)
-		appgo2wa.CmdGo2wa,
-		appcir.CmdCir,
-		appdoc.CmdDoc,
-		appdap.CmdDap,
-	}
-
-	cliApp.Run(os.Args)
 }
+
+func buildWat(filename string) (
+	prog *loader.Program, compiler *compiler_wat.Compiler,
+	watBytes []byte, err error,
+) {
+	cfg := config.DefaultConfig()
+	cfg.Target = config.WaOS_wasi
+	cfg.WaSizes.MaxAlign = 8
+	cfg.WaSizes.WordSize = 4
+
+	prog, err = loader.LoadProgram(cfg, filename)
+	if err != nil {
+		return prog, nil, nil, err
+	}
+
+	compiler = compiler_wat.New()
+	output, err := compiler.Compile(prog)
+
+	if err != nil {
+		return prog, nil, nil, err
+	}
+
+	return prog, compiler, []byte(output), nil
+}
+
+
+//export WaBuild
+func WaBuild(input *C.char) *C.char {
+	err := buildApp(C.GoString(input))
+	if err != nil {
+		return C.CString(err.Error())
+	}
+	return C.CString("")
+}
+
+//export WaFormat
+func WaFormat(input *C.char) *C.char {
+	code, changed, err := format.File(nil, C.GoString(input), nil)
+	if err != nil {
+		return C.CString(err.Error())
+	}
+	if changed {
+		return C.CString(string(code))
+	}
+	return C.CString("")
+}
+
+//export WaFreeCString
+func WaFreeCString(str *C.char) {
+	C.free(unsafe.Pointer(str))
+}
+
+func main() {}
