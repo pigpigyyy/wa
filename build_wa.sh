@@ -58,23 +58,22 @@ go build -buildmode=c-shared -ldflags="-s -w" -o wa.so
 cp wa.so ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/Android/x86_64/libwa.so
 rm -f wa.so wa.h
 
-echo "build Linux amd64"
-GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
-CC="zig cc -target x86_64-linux-gnu" \
-go build -buildmode=c-archive -ldflags="-s -w" -o wa.a
-cp wa.a ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/Linux/amd64/libwa.a
-rm -f wa.a wa.h
+#echo "build Linux amd64"
+#GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
+#go build -buildmode=c-archive -ldflags="-s -w" -o libwa.a
+#cp libwa.a ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/Linux/amd64/
+#rm -f libwa.a libwa.h
 
-echo "build Linux arm64"
-GOOS=linux GOARCH=arm64 CGO_ENABLED=1 \
-CC="zig cc -target aarch64-linux-gnu" \
-go build -buildmode=c-archive -ldflags="-s -w" -o wa.a
-cp wa.a ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/Linux/aarch64/libwa.a
-rm -f wa.a wa.h
+#echo "build Linux arm64"
+#GOOS=linux GOARCH=arm64 CGO_ENABLED=1 \
+#go build -buildmode=c-archive -ldflags="-s -w" -o libwa.a
+#cp libwa.a ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/Linux/aarch64/
+#rm -f libwa.a libwa.h
 
-echo "build Windows x86_64"
-GOOS=windows GOARCH=amd64 CGO_ENABLED=1 \
-CC="zig cc -target x86_64-windows-gnu" \
-go build -buildmode=c-archive -ldflags="-s -w" -o wa.lib
-cp wa.lib ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/Windows/wa.lib
+#echo "build Windows x86"
+#GOOS=windows GOARCH=386 CGO_ENABLED=1 \
+#CC="zig cc -target x86-windows-msvc" \
+#go build -buildmode=c-archive -ldflags="-s -w" -o wa.lib
+#cp wa.lib ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/Windows/wa.lib
+
 

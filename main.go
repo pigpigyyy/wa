@@ -109,7 +109,7 @@ func WaBuild(input *C.char) *C.char {
 func WaFormat(input *C.char) *C.char {
 	code, changed, err := format.File(nil, C.GoString(input), nil)
 	if err != nil {
-		return C.CString(err.Error())
+		return C.CString("")
 	}
 	if changed {
 		return C.CString(string(code))
