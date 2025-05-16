@@ -2,7 +2,8 @@ echo "build Windows x86"
 set GOOS=windows
 set GOARCH=386
 set CGO_ENABLED=1
-set CC=zig cc -target x86-windows-msvc
 set GOFLAGS=-buildvcs=false
-go build -buildmode=c-archive -ldflags="-s -w" -o wa.lib
-copy wa.lib "%~dp0..\Dora-SSR\Source\3rdParty\Wa\Lib\Windows\wa.lib"
+go build -buildmode=c-shared -ldflags="-s -w" -o wa.dll
+lib /def:wa.def /name:wa.dll /out:wa.lib /MACHINE:X86
+xcopy wa.lib "%~dp0..\Dora-SSR\Source\3rdParty\Wa\Lib\Windows\wa.lib" /Y
+xcopy wa.dll "%~dp0..\Dora-SSR\Source\3rdParty\Wa\Lib\Windows\wa.dll" /Y

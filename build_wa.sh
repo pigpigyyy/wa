@@ -37,26 +37,14 @@ lipo -create wa1.a wa2.a -output libwa.a
 cp libwa.a ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/iOS-Simulator/
 rm -f wa1.a wa2.a libwa.a wa.h
 
-echo "build Android arm64"
-GOOS=android GOARCH=arm64 CGO_ENABLED=1 \
-CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$(uname -s | tr '[:upper:]' '[:lower:]')-x86_64/bin/aarch64-linux-android28-clang" \
-go build -buildmode=c-shared -ldflags="-s -w" -o wa.so
-cp wa.so ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/Android/arm64-v8a/libwa.so
-rm -f wa.so wa.h
-
-echo "build Android arm"
-GOOS=android GOARCH=arm CGO_ENABLED=1 \
-CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$(uname -s | tr '[:upper:]' '[:lower:]')-x86_64/bin/armv7a-linux-androideabi28-clang" \
-go build -buildmode=c-shared -ldflags="-s -w" -o wa.so
-cp wa.so ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/Android/armeabi-v7a/libwa.so
-rm -f wa.so wa.h
-
-echo "build Android x86_64"
-GOOS=android GOARCH=amd64 CGO_ENABLED=1 \
-CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$(uname -s | tr '[:upper:]' '[:lower:]')-x86_64/bin/x86_64-linux-android28-clang" \
-go build -buildmode=c-shared -ldflags="-s -w" -o wa.so
-cp wa.so ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/Android/x86_64/libwa.so
-rm -f wa.so wa.h
+echo "build Android arm64 arm x86 x86_64"
+mv wa.gomobile wa.go
+mv main.go main.bak
+gomobile bind -v -o wa.aar -target=android .
+mv main.bak main.go
+mv wa.go wa.gomobile
+cp wa.aar ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/Android/
+rm -f wa.aar wa-sources.jar
 
 #echo "build Linux amd64"
 #GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
