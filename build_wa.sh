@@ -43,8 +43,17 @@ mv main.go main.bak
 gomobile bind -v -o wa.aar -target=android .
 mv main.bak main.go
 mv wa.go wa.gomobile
-cp wa.aar ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/Android/
-rm -f wa.aar wa-sources.jar
+rm -rf temp
+mkdir temp
+cd temp
+unzip ../wa.aar
+rm -rf jni/x86
+rm -f ../wa-slim.aar
+zip -r ../wa-slim.aar .
+cd ..
+cp wa-slim.aar ~/Workspace/Dora-SSR/Source/3rdParty/Wa/Lib/Android/wa.aar
+rm -f wa.aar wa-slim.aar wa-sources.jar
+rm -rf temp
 
 #echo "build Linux amd64"
 #GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
