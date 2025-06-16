@@ -34,7 +34,7 @@ type ImportSpec struct {
 	ObjKind   token.Token // 导入类别: MEMORY, TABLE, FUNC, GLOBAL
 
 	Memory     *Memory     // 导入内存
-	TableName  string      // 导入Table编号
+	Table      *Table      // 导入Table
 	GlobalName string      // 导入全局变量名字
 	GlobalType token.Token // 导入全局变量类型: I32, I64, F32, F64
 	FuncName   string      // 导入后函数名字
@@ -53,9 +53,10 @@ type ExportSpec struct {
 
 // 内存信息
 type Memory struct {
-	Name     string // 内存对象的名字
-	Pages    int    // 页数, 每页 64 KB
-	MaxPages int    // 最大页数
+	Name     string      // 名字
+	AddrType token.Token // 地址类型: i32, i64; 用于 memory64 支持
+	Pages    int         // 页数, 每页 64 KB
+	MaxPages int         // 最大页数
 }
 
 // 初始化数据

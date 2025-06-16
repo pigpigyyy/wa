@@ -82,7 +82,7 @@ func (p *wat2wasmWorker) findTableIndex(ident string) wasm.Index {
 	var importCount int
 	for _, x := range p.mWat.Imports {
 		if x.ObjKind == token.TABLE {
-			if x.TableName == ident {
+			if x.Table.Name == ident {
 				return wasm.Index(importCount)
 			}
 			importCount++
@@ -161,13 +161,13 @@ func (p *wat2wasmWorker) buildConstantExpression(g *ast.Global) *wasm.ConstantEx
 		x.Opcode = wasm.OpcodeI32Const
 		x.Data = p.encodeInt32(g.I32Value)
 	case token.I64:
-		x.Opcode = wasm.OpcodeI32Const
+		x.Opcode = wasm.OpcodeI64Const
 		x.Data = p.encodeInt64(g.I64Value)
 	case token.F32:
-		x.Opcode = wasm.OpcodeI32Const
+		x.Opcode = wasm.OpcodeF32Const
 		x.Data = p.encodeFloat32(g.F32Value)
 	case token.F64:
-		x.Opcode = wasm.OpcodeI32Const
+		x.Opcode = wasm.OpcodeF64Const
 		x.Data = p.encodeFloat64(g.F64Value)
 	default:
 		panic("unreachable")
@@ -202,7 +202,7 @@ func (p *wat2wasmWorker) encodeFloat64(i float64) []byte {
 	binary.LittleEndian.PutUint64(b, math.Float64bits(i))
 	return b
 }
-func (p *wat2wasmWorker) encodeAlign(align uint) byte {
+func (p *wat2wasmWorker) encodeAlign(align uint32) byte {
 	switch align {
 	case 1:
 		return 0

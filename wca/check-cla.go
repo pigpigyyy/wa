@@ -19,6 +19,7 @@ var wcaMap = map[string]bool{
 	"64215+codefromthecrypt@users.noreply.github.com": true,
 	"704566072@qq.com":            true,
 	"ben.shi@streamcomputing.com": true,
+	"bennshi@tencent.com":         true,
 	"chaishushan@gmail.com":       true,
 	"humengmingxx@gmail.com":      true,
 	"imcusg@gmail.com":            true,
@@ -27,6 +28,8 @@ var wcaMap = map[string]bool{
 	"wuxuan.ecios@gmail.com":      true,
 	"zhanluxianshen@163.com":      true,
 	"dragon-fly@qq.com":           true,
+	"zhaopuming@gmail.com":        true,
+	"2879499479@qq.com":           true, // https://gitee.com/imalasong
 }
 
 func main() {

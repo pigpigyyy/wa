@@ -3,11 +3,13 @@
 package wat2c
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"unicode"
 
-	"wa-lang.org/wa/internal/wat/token"
+	"wa-lang.org/wa/internal/wat/ast"
+	"wa-lang.org/wa/internal/wat/printer"
 )
 
 func assert(condition bool, args ...interface{}) {
@@ -24,49 +26,23 @@ func unreachable() {
 	panic("unreachable")
 }
 
-func toCType(typ token.Token) string {
-	switch typ {
-	case token.I32:
-		return "int32_t"
-	case token.I64:
-		return "int64_t"
-	case token.F32:
-		return "float"
-	case token.F64:
-		return "double"
-	default:
-		return "void"
-	}
-}
-
-// 生成C语言的标识符
-func toCGlobalName(name string) string {
-	return "g_" + toCName(name)
-}
-func toCFuncName(name string) string {
-	return "f_" + toCName(name)
-}
-func toCFuncArgName(name string) string {
-	return "a_" + toCName(name)
-}
-func toCFuncLocalName(name string) string {
-	return "v_" + toCName(name)
-}
-func toCFuncLabelName(name string) string {
-	return "L_" + toCName(name)
-}
-
 func toCName(name string) string {
 	if name == "" {
 		return name
 	}
-	if c := name[0]; c >= '0' && c <= '9' {
-		return name
-	}
+
+	// pkg 路径可能以数字开头
+	// if c := name[0]; c >= '0' && c <= '9' {
+	// 	return name
+	// }
 
 	var sb strings.Builder
 	for _, c := range ([]rune)(name) {
 		switch {
+		case c == '$':
+			sb.WriteRune('_')
+		case c == '.':
+			sb.WriteRune('_')
 		case '0' <= c && c <= '9':
 			sb.WriteRune(c)
 		case 'a' <= c && c <= 'z':
@@ -81,4 +57,11 @@ func toCName(name string) string {
 	}
 
 	return sb.String()
+}
+
+// 格式化指令
+func insString(i ast.Instruction) string {
+	var buf bytes.Buffer
+	printer.PrintInstruction(&buf, "", i, 0)
+	return strings.TrimSpace(buf.String())
 }

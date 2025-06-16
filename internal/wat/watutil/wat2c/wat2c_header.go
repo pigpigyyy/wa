@@ -20,44 +20,32 @@ func (p *wat2cWorker) buildHeader(w io.Writer) error {
 	fmt.Fprintf(w, "#pragma once\n")
 	fmt.Fprintln(w)
 
+	fmt.Fprintf(w, "#ifndef _%s_H_\n", p.opt.Prefix)
+	fmt.Fprintf(w, "#define _%s_H_\n", p.opt.Prefix)
+	fmt.Fprintln(w)
+
 	fmt.Fprintf(w, "#include <stdint.h>\n")
 	fmt.Fprintln(w)
 
-	fmt.Fprintf(w, "typedef uint8_t   u8_t;\n")
-	fmt.Fprintf(w, "typedef int8_t    i8_t;\n")
-	fmt.Fprintf(w, "typedef uint16_t  u16_t;\n")
-	fmt.Fprintf(w, "typedef int16_t   i16_t;\n")
-	fmt.Fprintf(w, "typedef uint32_t  u32_t;\n")
-	fmt.Fprintf(w, "typedef int32_t   i32_t;\n")
-	fmt.Fprintf(w, "typedef uint64_t  u64_t;\n")
-	fmt.Fprintf(w, "typedef int64_t   i64_t;\n")
-	fmt.Fprintf(w, "typedef float     f32_t;\n")
-	fmt.Fprintf(w, "typedef double    f64_t;\n")
-	fmt.Fprintf(w, "typedef uintptr_t ref_t;\n")
+	fmt.Fprintf(w, "#ifdef __cplusplus\n")
+	fmt.Fprintf(w, "extern \"C\" {\n")
+	fmt.Fprintf(w, "#endif\n")
 	fmt.Fprintln(w)
-
-	fmt.Fprintf(w, "typedef union val_t {\n")
-	fmt.Fprintf(w, "  i64_t i64;\n")
-	fmt.Fprintf(w, "  f64_t f64;\n")
-	fmt.Fprintf(w, "  i32_t i32;\n")
-	fmt.Fprintf(w, "  f32_t f32;\n")
-	fmt.Fprintf(w, "  ref_t ref;\n")
-	fmt.Fprintf(w, "} val_t;\n\n")
 
 	if p.m.Memory != nil {
 		if p.m.Memory.Name != "" {
 			fmt.Fprintf(w, "// memory $%s\n", p.m.Memory.Name)
 		}
 		if max := p.m.Memory.MaxPages; max > 0 {
-			fmt.Fprintf(w, "extern uint8_t       wasm_memory[%d*64*1024];\n", max)
-			fmt.Fprintf(w, "extern const int32_t wasm_memory_init_max_pages = %d;\n", max)
-			fmt.Fprintf(w, "extern const int32_t wasm_memory_init_pages = %d;\n", p.m.Memory.Pages)
-			fmt.Fprintf(w, "extern int32_t       wasm_memory_size = %d;\n", p.m.Memory.Pages)
+			fmt.Fprintf(w, "extern uint8_t*      %s_memory;\n", p.opt.Prefix)
+			fmt.Fprintf(w, "extern const int32_t %s_memory_init_max_pages; // = %d;\n", p.opt.Prefix, max)
+			fmt.Fprintf(w, "extern const int32_t %s_memory_init_pages; // = %d;\n", p.opt.Prefix, p.m.Memory.Pages)
+			fmt.Fprintf(w, "extern int32_t       %s_memory_size; // = %d;\n", p.opt.Prefix, p.m.Memory.Pages)
 		} else {
-			fmt.Fprintf(w, "extern uint8_t       wasm_memory[%d*64*1024];\n", p.m.Memory.Pages)
-			fmt.Fprintf(w, "extern const int32_t wasm_memory_init_max_pages = %d;\n", p.m.Memory.Pages)
-			fmt.Fprintf(w, "extern const int32_t wasm_memory_init_pages = %d;\n", p.m.Memory.Pages)
-			fmt.Fprintf(w, "extern int32_t       wasm_memory_size = %d;\n", p.m.Memory.Pages)
+			fmt.Fprintf(w, "extern uint8_t*      %s_memory;\n", p.opt.Prefix)
+			fmt.Fprintf(w, "extern const int32_t %s_memory_init_max_pages; // = %d;\n", p.opt.Prefix, p.m.Memory.Pages)
+			fmt.Fprintf(w, "extern const int32_t %s_memory_init_pages; // = %d;\n", p.opt.Prefix, p.m.Memory.Pages)
+			fmt.Fprintf(w, "extern int32_t       %s_memory_size; // = %d;\n", p.opt.Prefix, p.m.Memory.Pages)
 		}
 		fmt.Fprintln(w)
 	}
@@ -66,18 +54,25 @@ func (p *wat2cWorker) buildHeader(w io.Writer) error {
 			fmt.Fprintf(w, "// table $%s\n", p.m.Table.Name)
 		}
 		if max := p.m.Table.MaxSize; max > 0 {
-			fmt.Fprintf(w, "extern ref_t     wasm_table[%d];\n", max)
-			fmt.Fprintf(w, "extern const int wasm_table_init_max_size = %d;\n", max)
-			fmt.Fprintf(w, "extern int32_t   wasm_table_size = %d;\n", p.m.Table.Size)
+			fmt.Fprintf(w, "extern uintptr_t %s_table[/*%d*/];\n", p.opt.Prefix, max)
+			fmt.Fprintf(w, "extern const int %s_table_init_max_size; // = %d;\n", p.opt.Prefix, max)
+			fmt.Fprintf(w, "extern int32_t   %s_table_size; // = %d;\n", p.opt.Prefix, p.m.Table.Size)
 		} else {
-			fmt.Fprintf(w, "extern ref_t     wasm_table[%d];\n", p.m.Table.Size)
-			fmt.Fprintf(w, "extern const int wasm_table_init_max_size = %d;\n", p.m.Table.Size)
-			fmt.Fprintf(w, "extern int32_t   wasm_table_size = %d;\n", p.m.Table.Size)
+			fmt.Fprintf(w, "extern uintptr_t %s_table[/*%d*/];\n", p.opt.Prefix, p.m.Table.Size)
+			fmt.Fprintf(w, "extern const int %s_table_init_max_size; // = %d;\n", p.opt.Prefix, p.m.Table.Size)
+			fmt.Fprintf(w, "extern int32_t   %s_table_size; // = %d;\n", p.opt.Prefix, p.m.Table.Size)
 		}
 		fmt.Fprintln(w)
 	}
 
-	fmt.Fprintf(w, "extern uint8_t* wasm_memory_addr_at(i32_t idx, const char* file, i32_t line);\n")
+	fmt.Fprintf(w, "extern void %s_init();\n", p.opt.Prefix)
+
+	// 生成 main 函数
+	for _, fn := range p.m.Funcs {
+		if fn.ExportName == "_main" {
+			fmt.Fprintf(w, "extern void %s_main();\n", p.opt.Prefix)
+		}
+	}
 	fmt.Fprintln(w)
 
 	if len(p.m.Exports) == 0 {
@@ -101,6 +96,13 @@ func (p *wat2cWorker) buildHeader(w io.Writer) error {
 
 		fmt.Fprintf(w, "// func $%s\n", f.Name)
 
+		if f.ExportName != f.Name {
+			fmt.Fprintf(w, "#define %s_%s %s_%s\n",
+				p.opt.Prefix, toCName(f.ExportName),
+				p.opt.Prefix, toCName(f.Name),
+			)
+		}
+
 		// 返回值类型
 		cRetType := p.getFuncCRetType(f.Type, f.Name)
 		if len(f.Type.Results) > 1 {
@@ -111,19 +113,19 @@ func (p *wat2cWorker) buildHeader(w io.Writer) error {
 				}
 				switch f.Type.Results[i] {
 				case token.I32:
-					fmt.Fprintf(w, "i32_t $R%d;", i)
+					fmt.Fprintf(w, "int32_t R%d;", i)
 				case token.I64:
-					fmt.Fprintf(w, "i64_t $R%d;", i)
+					fmt.Fprintf(w, "int64_t R%d;", i)
 				case token.F32:
-					fmt.Fprintf(w, "f32_t $R%d;", i)
+					fmt.Fprintf(w, "float R%d;", i)
 				case token.F64:
-					fmt.Fprintf(w, "f64_t $R%d;", i)
+					fmt.Fprintf(w, "double R%d;", i)
 				}
 			}
-			fmt.Fprintf(w, "} fn_%s_ret_t;\n", toCName(f.Name))
+			fmt.Fprintf(w, "} %s_%s_ret_t;\n", p.opt.Prefix, toCName(f.Name))
 		}
 
-		fmt.Fprintf(w, "extern %s fn_%s(", cRetType, toCName(f.Name))
+		fmt.Fprintf(w, "extern %s %s_%s(", cRetType, p.opt.Prefix, toCName(f.Name))
 		if len(f.Type.Params) > 0 {
 			for i, x := range f.Type.Params {
 				if i > 0 {
@@ -132,36 +134,43 @@ func (p *wat2cWorker) buildHeader(w io.Writer) error {
 				switch x.Type {
 				case token.I32:
 					if x.Name != "" {
-						fmt.Fprintf(w, "i32_t %v", toCName(x.Name))
+						fmt.Fprintf(w, "int32_t %v", toCName(x.Name))
 					} else {
-						fmt.Fprintf(w, "i32_t $arg%d", i)
+						fmt.Fprintf(w, "int32_t arg%d", i)
 					}
 				case token.I64:
 					if x.Name != "" {
-						fmt.Fprintf(w, "i64_t %v", toCName(x.Name))
+						fmt.Fprintf(w, "int64_t %v", toCName(x.Name))
 					} else {
-						fmt.Fprintf(w, "i64_t $arg%d", i)
+						fmt.Fprintf(w, "int64_t arg%d", i)
 					}
 				case token.F32:
 					if x.Name != "" {
-						fmt.Fprintf(w, "f32_t %v", toCName(x.Name))
+						fmt.Fprintf(w, "float %v", toCName(x.Name))
 					} else {
-						fmt.Fprintf(w, "f32_t $arg%d", i)
+						fmt.Fprintf(w, "float arg%d", i)
 					}
 				case token.F64:
 					if x.Name != "" {
-						fmt.Fprintf(w, "f64_t %v", toCName(x.Name))
+						fmt.Fprintf(w, "double %v", toCName(x.Name))
 					} else {
-						fmt.Fprintf(w, "f64_t $arg%d", i)
+						fmt.Fprintf(w, "double arg%d", i)
 					}
 				default:
 					unreachable()
 				}
 			}
 		}
-		fmt.Fprintf(w, ");\n")
+		fmt.Fprintf(w, ");\n\n")
 	}
 	fmt.Fprintln(w)
+
+	fmt.Fprintf(w, "#ifdef __cplusplus\n")
+	fmt.Fprintf(w, "} // extern C \n")
+	fmt.Fprintf(w, "#endif\n")
+	fmt.Fprintln(w)
+
+	fmt.Fprintf(w, "#endif // _%s_H_\n", p.opt.Prefix)
 
 	return nil
 }

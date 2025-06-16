@@ -3,11 +3,11 @@
 package appbuild
 
 import (
-	"bytes"
 	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"wa-lang.org/wa/internal/3rdparty/cli"
 	"wa-lang.org/wa/internal/app/appbase"
@@ -15,10 +15,23 @@ import (
 	"wa-lang.org/wa/internal/config"
 	"wa-lang.org/wa/internal/loader"
 	"wa-lang.org/wa/internal/wat/watutil"
+	"wa-lang.org/wa/internal/wat/watutil/wat2c"
 )
 
 //go:embed assets/arduino.ino
 var arduino_ino string
+
+//go:embed assets/arduino-host.cpp
+var arduino_host_cpp string
+
+//go:embed assets/native-js-host.cpp
+var native_js_host_cpp string
+
+//go:embed assets/native.cpp
+var native_main_cpp string
+
+//go:embed assets/CMakeLists.txt
+var cmakelists_txt string
 
 //go:embed assets/favicon.ico
 var favicon_ico string
@@ -38,10 +51,12 @@ var CmdBuild = &cli.Command{
 	Flags: []cli.Flag{
 		appbase.MakeFlag_output(),
 		appbase.MakeFlag_target(),
+		appbase.MakeFlag_wat2c_prefix(),
 		appbase.MakeFlag_tags(),
 		appbase.MakeFlag_ld_stack_size(),
 		appbase.MakeFlag_ld_max_memory(),
 		appbase.MakeFlag_optimize(),
+		appbase.MakeFlag_wat2c_native(),
 	},
 	Action: CmdBuildAction,
 }
@@ -248,6 +263,59 @@ func BuildApp(opt *appbase.Option, input, outfile string) (mainFunc string, wasm
 				os.Exit(1)
 			}
 
+			// 通过 wat2c 生成 native c 代码
+			if opt.Wat2CNative {
+				nativeDir := filepath.Join(filepath.Dir(outfile), "native")
+
+				mainCppOutfile := filepath.Join(filepath.Dir(outfile), "native", "main.cpp")
+				cmakeOutfile := filepath.Join(filepath.Dir(outfile), "native", "CMakeLists.txt")
+				hostCppOutfile := filepath.Join(filepath.Dir(outfile), "native", "native-host.cpp")
+				waAppCfile := filepath.Join(filepath.Dir(outfile), "native", "wa-app.c")
+				waAppHfile := filepath.Join(filepath.Dir(outfile), "native", "wa-app.h")
+
+				os.MkdirAll(nativeDir, 0777)
+
+				// 主文件
+				if !appbase.PathExists(mainCppOutfile) {
+					os.WriteFile(mainCppOutfile, []byte(native_main_cpp), 0666)
+				}
+				if !appbase.PathExists(cmakeOutfile) {
+					os.WriteFile(cmakeOutfile, []byte(cmakelists_txt), 0666)
+				}
+
+				pkgName := manifest.Pkg.Name
+				m, code, header, err := watutil.Wat2C("wa-app.wat", watOutput, wat2c.Options{
+					Prefix: opt.Wat2CPrefix,
+					Exports: map[string]string{
+						pkgName + ".Loop": "loop",
+					},
+				})
+				if err != nil {
+					os.WriteFile(outfile, code, 0666)
+					fmt.Println(err)
+					os.Exit(1)
+				}
+
+				os.WriteFile(waAppCfile, []byte(code), 0666)
+				os.WriteFile(waAppHfile, []byte(header), 0666)
+
+				// 宿主的C代码
+				if !appbase.PathExists(hostCppOutfile) {
+					sMemoryBytes := "8" // 8 byte
+					if m.Memory != nil && m.Memory.Pages > 0 {
+						pages := m.Memory.Pages
+						if m.Memory.MaxPages > pages {
+							pages = m.Memory.MaxPages
+						}
+						sMemoryBytes = fmt.Sprintf("%d*(1<<16)", pages)
+					}
+
+					// 初始化 host 静态内存大小
+					host_cpp_code := strings.ReplaceAll(native_js_host_cpp, "{{.MemoryBytes}}", sMemoryBytes)
+					os.WriteFile(hostCppOutfile, []byte(host_cpp_code), 0666)
+				}
+			}
+
 		case config.WaOS_wasm4:
 			icoOutfile := filepath.Join(filepath.Dir(outfile), "favicon.ico")
 			w4JsOutfile := filepath.Join(filepath.Dir(outfile), "wasm4.js")
@@ -264,35 +332,57 @@ func BuildApp(opt *appbase.Option, input, outfile string) (mainFunc string, wasm
 		case config.WaOS_arduino:
 			arduinoDir := filepath.Join(filepath.Dir(outfile), "arduino")
 			inoOutfile := filepath.Join(filepath.Dir(outfile), "arduino", "arduino.ino")
-			appHeaderOutfile := filepath.Join(filepath.Dir(outfile), "arduino", "app.wasm.h")
-
-			var buf bytes.Buffer
-			// unsigned int app_wasm_len = ?;
-			// unsigned char app_wasm[] = { 0x00, 0x01, ... };
-			fmt.Fprintf(&buf, "// Auto Generate by Wa language. See https://wa-lang.org\n\n")
-			fmt.Fprintf(&buf, "unsigned int app_wasm_len = %d;\n\n", len(wasmBytes))
-			fmt.Fprintf(&buf, "unsigned char app_wasm[] = {")
-			for i, ch := range wasmBytes {
-				if i%10 == 0 {
-					fmt.Fprintf(&buf, "\n\t0x%02x,", ch)
-				} else {
-					fmt.Fprintf(&buf, " 0x%02x,", ch)
-					if i == len(wasmBytes)-1 {
-						fmt.Fprintln(&buf)
-					}
-				}
-			}
-			fmt.Fprintf(&buf, "};\n")
+			hostCppOutfile := filepath.Join(filepath.Dir(outfile), "arduino", "arduino-host.cpp")
+			waAppCfile := filepath.Join(filepath.Dir(outfile), "arduino", "wa-app.c")
+			waAppHfile := filepath.Join(filepath.Dir(outfile), "arduino", "wa-app.h")
 
 			os.MkdirAll(arduinoDir, 0777)
-			os.WriteFile(inoOutfile, []byte(arduino_ino), 0666)
-			os.WriteFile(appHeaderOutfile, buf.Bytes(), 0666)
+
+			// 主文件
+			if !appbase.PathExists(inoOutfile) {
+				os.WriteFile(inoOutfile, []byte(arduino_ino), 0666)
+			}
 
 			// wasm 写到文件
 			err = os.WriteFile(outfile, wasmBytes, 0666)
 			if err != nil {
 				fmt.Printf("write %s failed: %v\n", outfile, err)
 				os.Exit(1)
+			}
+
+			// 生成wat转译的C代码
+			{
+				pkgName := manifest.Pkg.Name
+				m, code, header, err := watutil.Wat2C("wa-app.wat", watOutput, wat2c.Options{
+					Prefix: opt.Wat2CPrefix,
+					Exports: map[string]string{
+						pkgName + ".Loop": "loop",
+					},
+				})
+				if err != nil {
+					os.WriteFile(outfile, code, 0666)
+					fmt.Println(err)
+					os.Exit(1)
+				}
+
+				os.WriteFile(waAppCfile, []byte(code), 0666)
+				os.WriteFile(waAppHfile, []byte(header), 0666)
+
+				// 宿主的C代码
+				if !appbase.PathExists(hostCppOutfile) {
+					sMemoryBytes := "8" // 8 byte
+					if m.Memory != nil && m.Memory.Pages > 0 {
+						pages := m.Memory.Pages
+						if m.Memory.MaxPages > pages {
+							pages = m.Memory.MaxPages
+						}
+						sMemoryBytes = fmt.Sprintf("%d*(1<<16)", pages)
+					}
+
+					// 初始化 host 静态内存大小
+					host_cpp_code := strings.ReplaceAll(arduino_host_cpp, "{{.MemoryBytes}}", sMemoryBytes)
+					os.WriteFile(hostCppOutfile, []byte(host_cpp_code), 0666)
+				}
 			}
 
 		default:
