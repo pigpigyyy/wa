@@ -19,7 +19,8 @@ import (
 
 /*
 #include <stdlib.h>
-extern void wa_emit(char* event, char* message);
+#cgo LDFLAGS: -L${SRCDIR} -ldora
+extern __declspec(dllimport) void wa_emit(char* event, char* message);
 */
 import "C"
 

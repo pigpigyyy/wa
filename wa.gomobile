@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"wa-lang.org/wa/internal/app/appbase"
 	"wa-lang.org/wa/internal/backends/compiler_wat"
@@ -11,6 +12,8 @@ import (
 	"wa-lang.org/wa/internal/format"
 	"wa-lang.org/wa/internal/loader"
 	"wa-lang.org/wa/internal/wat/watutil"
+
+	"github.com/go-git/go-git/v5"
 )
 
 func buildApp(input string) (err error) {
@@ -90,24 +93,172 @@ func buildWat(filename string) (
 	return prog, compiler, []byte(output), nil
 }
 
-//export WaBuild
-func WaBuild(input string) string {
-	err := buildApp(input)
-	if err != nil {
-		return err.Error()
-	}
-	return ""
+type JavaCallbackInterface interface {
+	Build(x string)
+	Format(x string)
+	GitProgress(x string)
+	GitPullOrClone(x string)
 }
+
+var callbackObj JavaCallbackInterface
+
+func SetCallback(c JavaCallbackInterface) {
+	callbackObj = c
+}
+
+var buildMutex sync.Mutex
+
+//export WaBuild
+func WaBuild(input string) bool {
+	if buildMutex.TryLock() {
+		go func() {
+			defer buildMutex.Unlock()
+			err := buildApp(input)
+			var msg string
+			if err != nil {
+				msg = err.Error()
+			} else {
+				msg = ""
+			}
+			if callbackObj != nil {
+				callbackObj.Build(msg)
+			}
+		}()
+		return true
+	}
+	return false
+}
+
+var formatMutex sync.Mutex
 
 //export WaFormat
-func WaFormat(input string) string {
-	code, changed, err := format.File(nil, input, nil)
-	if err != nil {
-		return ""
+func WaFormat(input string) bool {
+	if formatMutex.TryLock() {
+		go func() {
+			defer formatMutex.Unlock()
+			code, changed, err := format.File(nil, input, nil)
+			var res string
+			if err == nil && changed {
+				res = string(code)
+			} else {
+				res = ""
+			}
+			if callbackObj != nil {
+				callbackObj.Format(res)
+			}
+		}()
+		return true
 	}
-	if changed {
-		return string(code)
-	}
-	return ""
+	return false
 }
 
+// repo represents a Git repository
+type repo struct {
+	URL      string
+	Path     string
+}
+
+// newRepo creates a new repo instance
+func newRepo(url, fullpath string) *repo {
+	return &repo{
+		URL:    url,
+		Path:   fullpath,
+	}
+}
+
+// PullOrClone pulls or clones the repository
+func (r *repo) PullOrClone(depth int) error {
+	repo, err := r.openOrClone()
+	if err != nil {
+		return fmt.Errorf("failed to open/clone repo: %w", err)
+	}
+
+	// Get the worktree
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	// Pull the latest changes
+	err = worktree.Pull(&git.PullOptions{
+		Force:  true,
+		Depth:  depth,
+	})
+	if err != nil && err != git.NoErrAlreadyUpToDate {
+		return fmt.Errorf("failed to pull: %w", err)
+	}
+
+	err = repo.Fetch(&git.FetchOptions{
+		RemoteName: "origin",
+		Tags:       git.AllTags,
+		Force:      true,
+	})
+	if err != nil && err != git.NoErrAlreadyUpToDate {
+		return fmt.Errorf("failed to fetch: %w", err)
+	}
+
+	return nil
+}
+
+type waEmitProgressWriter struct {}
+
+func (w *waEmitProgressWriter) Write(p []byte) (n int, err error) {
+	msg := string(p)
+	if callbackObj != nil {
+		callbackObj.GitProgress(msg)
+	}
+	return len(p), nil
+}
+
+// openOrClone opens an existing repository or clones it if it doesn't exist
+func (r *repo) openOrClone() (*git.Repository, error) {
+	// Try to open existing repository
+	repo, err := git.PlainOpen(r.Path)
+	if err == nil {
+		return repo, nil
+	}
+
+	// If repository doesn't exist, clone it
+	if err == git.ErrRepositoryNotExists {
+
+		// Create directory if it doesn't exist
+		if err := os.MkdirAll(r.Path, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create directory: %w", err)
+		}
+
+		// Clone the repository
+		repo, err = git.PlainClone(r.Path, false, &git.CloneOptions{
+			URL:      r.URL,
+			Progress: &waEmitProgressWriter{},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to clone: %w", err)
+		}
+
+		return repo, nil
+	}
+
+	return nil, err
+}
+
+var pullOrCloneMutex sync.Mutex
+
+//export WaPullOrClone
+func WaPullOrClone(url string, path string, depth int) bool {
+	if pullOrCloneMutex.TryLock() {
+		go func() {
+			defer pullOrCloneMutex.Unlock()
+			repo := newRepo(url, path)
+			err := repo.PullOrClone(depth)
+			if callbackObj != nil {
+				if err != nil {
+					callbackObj.GitPullOrClone(err.Error())
+				} else {
+					callbackObj.GitPullOrClone("")
+				}
+			}
+		}()
+		return true
+	}
+	return false
+}

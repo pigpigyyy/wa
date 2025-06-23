@@ -1,4 +1,7 @@
 EXPORTS
     WaBuild
     WaFormat
-    WaFreeCString
+    WaPullOrClone
+
+IMPORTS
+    wa_emit
