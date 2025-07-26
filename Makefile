@@ -71,3 +71,19 @@ wasm-wasip1:
 
 clean:
 	-rm a.out*
+
+GO_IMAGE := golang:1.24
+
+build-x86:
+	docker run --rm \
+	  --platform linux/amd64 \
+	  -v $(PWD):/go/src/app \
+	  -w /go/src/app \
+	  -e CGO_ENABLED=1 \
+	  -e GOOS=linux \
+	  -e GOARCH=amd64 \
+	  $(GO_IMAGE) \
+	  sh -c "go build -buildmode=c-archive -ldflags='-s -w' -o libwa.a"
+	cp libwa.a ../Dora-SSR/Source/3rdParty/Wa/Lib/Linux/amd64/
+	rm -f libwa.a libwa.h
+

@@ -12,6 +12,8 @@ import (
 	"wa-lang.org/wa/internal/ssa"
 )
 
+const wasmPageSize = 64 << 10
+
 type fnSigWrap struct {
 	name     string
 	typeAddr int
@@ -312,11 +314,20 @@ func (m *Module) ToWatModule() *wat.Module {
 
 	{
 		// todo:
+		heapBase := makeAlign(m.DataSeg.Size()+16, 16)
 		var heap_base wat.Global
 		heap_base.V = wat.NewVar("__heap_base", wat.I32{})
 		heap_base.IsMut = false
-		heap_base.InitValue = strconv.Itoa(makeAlign(m.DataSeg.Size()+16, 16))
+		heap_base.InitValue = strconv.Itoa(heapBase)
 		wat_module.Globals = append(wat_module.Globals, heap_base)
+
+		// Ensure initial memory can hold the active data segment and the initial heap header.
+		minBytes := heapBase + 48 + 1
+		minPages := (minBytes + wasmPageSize - 1) / wasmPageSize
+		if minPages < 1 {
+			minPages = 1
+		}
+		wat_module.BaseWat = strings.Replace(wat_module.BaseWat, "(memory $memory 1024)", "(memory $memory "+strconv.Itoa(minPages)+")", 1)
 	}
 
 	wat_module.DataSeg = m.DataSeg
