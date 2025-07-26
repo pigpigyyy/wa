@@ -1,10 +1,9 @@
-package main
+package wa
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"unsafe"
 
 	"wa-lang.org/wa/internal/app/appbase"
 	"wa-lang.org/wa/internal/backends/compiler_wat"
@@ -14,11 +13,6 @@ import (
 	"wa-lang.org/wa/internal/wat/watutil"
 	"wa-lang.org/wa/internal/wat/watutil/watstrip"
 )
-
-/*
-#include <stdlib.h>
-*/
-import "C"
 
 func buildApp(input string) (err error) {
 	// 路径是否存在
@@ -98,29 +92,23 @@ func buildWat(filename string) (
 }
 
 //export WaBuild
-func WaBuild(input *C.char) *C.char {
-	err := buildApp(C.GoString(input))
+func WaBuild(input string) string {
+	err := buildApp(input)
 	if err != nil {
-		return C.CString(err.Error())
+		return err.Error()
 	}
-	return C.CString("")
+	return ""
 }
 
 //export WaFormat
-func WaFormat(input *C.char) *C.char {
-	code, changed, err := format.File(nil, C.GoString(input), nil)
+func WaFormat(input string) string {
+	code, changed, err := format.File(nil, input, nil)
 	if err != nil {
-		return C.CString("")
+		return ""
 	}
 	if changed {
-		return C.CString(string(code))
+		return string(code)
 	}
-	return C.CString("")
+	return ""
 }
 
-//export WaFreeCString
-func WaFreeCString(str *C.char) {
-	C.free(unsafe.Pointer(str))
-}
-
-func main() { }
