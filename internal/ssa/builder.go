@@ -372,7 +372,7 @@ func (b *builder) addr(fn *Function, e ast.Expr, escaping bool) lvalue {
 			et = types.NewPointer(t.Elem())
 		case *types.Pointer: // *array
 			x = b.expr(fn, e.X)
-			emitNilCheck(fn, x, e.X.Pos())
+			emitNilCheck(fn, x, e.X)
 			et = types.NewPointer(t.Elem().Underlying().(*types.Array).Elem())
 		case *types.Slice:
 			x = b.expr(fn, e.X)
@@ -530,7 +530,7 @@ func (b *builder) exprDeref(fn *Function, e ast.Expr) Value {
 	} else {
 		v = b.expr0(fn, e, tv)
 	}
-	emitNilCheck(fn, v, e.Pos())
+	emitNilCheck(fn, v, e)
 	if fn.debugInfo() {
 		emitDebugRef(fn, e, v, false)
 	}
@@ -735,7 +735,7 @@ func (b *builder) expr0(fn *Function, e ast.Expr, tv types.TypeAndValue) Value {
 			last := len(indices) - 1
 			v := b.expr(fn, e.X)
 			if tv := fn.Pkg.info.Types[unparen(e.X)]; isPointer(tv.Type) {
-				emitNilCheck(fn, v, e.X.Pos())
+				emitNilCheck(fn, v, e.X)
 			}
 			v = emitImplicitSelections(fn, v, indices[:last])
 			v = emitFieldSelection(fn, v, indices[last], false, e.Sel)
@@ -819,7 +819,7 @@ func (b *builder) receiver(fn *Function, e ast.Expr, wantAddr, escaping bool, se
 	}
 
 	if tv := fn.Pkg.info.Types[unparen(e)]; isPointer(tv.Type) || isInterface(tv.Type) {
-		emitNilCheck(fn, v, e.Pos())
+		emitNilCheck(fn, v, e)
 	}
 	last := len(sel.Index()) - 1
 	v = emitImplicitSelections(fn, v, sel.Index()[:last])
@@ -892,7 +892,7 @@ func (b *builder) setCallFunc(fn *Function, e *ast.CallExpr, c *CallCommon) {
 	switch c.Value.(type) {
 	case *Function, *Builtin:
 	default:
-		emitNilCheck(fn, c.Value, e.Pos())
+		emitNilCheck(fn, c.Value, e.Fun)
 	}
 }
 

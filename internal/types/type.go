@@ -159,6 +159,8 @@ func (s *Struct) Tag(i int) string {
 type Pointer struct {
 	base      Type // element type
 	unsafePtr bool // unsafe.Pointer[T]
+	base Type // element type
+	This bool
 }
 
 // NewPointer returns a new pointer type for the given element (base) type.
