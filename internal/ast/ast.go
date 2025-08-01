@@ -334,6 +334,7 @@ type (
 	StarExpr struct {
 		Star token.Pos // position of "*"
 		X    Expr      // operand
+		This bool
 	}
 
 	// A UnaryExpr node represents a unary expression.

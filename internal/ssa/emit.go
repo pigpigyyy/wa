@@ -499,8 +499,15 @@ func emitRcEnable(f *Function, pos token.Pos) {
 
 // emitNilCheck emits to f a nil check for pointer value v.
 // If v is nil, it will panic with a runtime error.
-// pos is the position for the panic instruction.
-func emitNilCheck(f *Function, v Value, pos token.Pos) {
+// e is the expression that is being checked.
+func emitNilCheck(f *Function, v Value, e ast.Expr) {
+	tv := f.Pkg.info.Types[unparen(e)]
+	if pt, ok := tv.Type.Underlying().(*types.Pointer); ok && pt.This {
+		return
+	}
+
+	pos := e.Pos()
+
 	// Create a comparison: v == nil
 	nilVal := nilConst(v.Type())
 	cond := emitCompare(f, token.EQL, v, nilVal, pos)

@@ -158,6 +158,7 @@ func (s *Struct) Tag(i int) string {
 // A Pointer represents a pointer type.
 type Pointer struct {
 	base Type // element type
+	This bool
 }
 
 // NewPointer returns a new pointer type for the given element (base) type.

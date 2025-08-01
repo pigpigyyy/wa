@@ -233,8 +233,7 @@ func nat.mul(x, y: nat) => nat {
 
 	// determine if z can be reused
 	if alias(*this, x) || alias(*this, y) {
-		// 空指针操作
-		this = nil // z is an alias for x or y - cannot reuse
+		panic("z is an alias for x or y - cannot reuse")
 	}
 
 	z := this.make(m + n)

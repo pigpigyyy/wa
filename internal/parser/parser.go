@@ -2504,7 +2504,7 @@ func (p *parser) parseFuncDecl() *ast.FuncDecl {
 			thisIdent := &ast.Ident{Name: "this"}
 			thisField := &ast.Field{
 				Names: []*ast.Ident{thisIdent},
-				Type:  &ast.StarExpr{X: ident},
+				Type:  &ast.StarExpr{X: ident, This: true},
 			}
 			recv = &ast.FieldList{
 				List: []*ast.Field{thisField},

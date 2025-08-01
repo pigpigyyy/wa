@@ -29,17 +29,18 @@ func Ring.Move(n: int) => *Ring {
 	if this.next == nil {
 		return this.init()
 	}
+	t := this
 	switch {
 	case n < 0:
 		for ; n < 0; n++ {
-			this = this.prev
+			t = t.prev
 		}
 	case n > 0:
 		for ; n > 0; n-- {
-			this = this.next
+			t = t.next
 		}
 	}
-	return this
+	return t
 }
 
 func New(n: int) => *Ring {

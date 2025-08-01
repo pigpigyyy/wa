@@ -194,6 +194,12 @@ func (check *Checker) assignVar(lhs ast.Expr, x *operand) Type {
 		return nil
 	}
 
+	if ident != nil && ident.Name == "this" {
+		if p, ok := z.typ.(*Pointer); ok && p.This {
+			check.errorf(x.pos(), "implicit 'this' is not assignable")
+		}
+	}
+
 	check.assignment(x, z.typ, "assignment")
 	if x.mode == invalid {
 		return nil

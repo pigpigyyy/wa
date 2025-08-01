@@ -320,6 +320,7 @@ func (check *Checker) typInternal(e ast.Expr, def *Named) Type {
 		typ := new(Pointer)
 		def.setUnderlying(typ)
 		typ.base = check.indirectType(e.X)
+		typ.This = e.This
 		return typ
 
 	case *ast.FuncType:
