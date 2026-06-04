@@ -10,6 +10,7 @@ import (
 	"wa-lang.org/wa/internal/backends/compiler_wat"
 	"wa-lang.org/wa/internal/config"
 	"wa-lang.org/wa/internal/format"
+	"wa-lang.org/wa/internal/gitjobs"
 	"wa-lang.org/wa/internal/loader"
 	"wa-lang.org/wa/internal/wat/watutil"
 	"wa-lang.org/wa/internal/wat/watutil/watstrip"
@@ -37,7 +38,7 @@ func buildApp(input string) (err error) {
 		return fmt.Errorf("%q is invalid wa moudle", input)
 	}
 
-	outfile := filepath.Join(input, manifest.Pkg.Name + ".wasm")
+	outfile := filepath.Join(input, manifest.Pkg.Name+".wasm")
 
 	manifest.Pkg.Target = config.WaOS_wasi
 
@@ -123,4 +124,55 @@ func WaFreeCString(str *C.char) {
 	C.free(unsafe.Pointer(str))
 }
 
-func main() { }
+//export WaGitStartClone
+func WaGitStartClone(url *C.char, path *C.char, branch *C.char, token *C.char, depth C.int) C.longlong {
+	return C.longlong(gitjobs.StartClone(
+		C.GoString(url),
+		C.GoString(path),
+		C.GoString(branch),
+		C.GoString(token),
+		int(depth),
+	))
+}
+
+//export WaGitStartPull
+func WaGitStartPull(path *C.char, branch *C.char, token *C.char, force C.int) C.longlong {
+	return C.longlong(gitjobs.StartPull(
+		C.GoString(path),
+		C.GoString(branch),
+		C.GoString(token),
+		force != 0,
+	))
+}
+
+//export WaGitRun
+func WaGitRun(repoPath *C.char, command *C.char, optionsJSON *C.char) C.longlong {
+	return C.longlong(gitjobs.StartRun(
+		C.GoString(repoPath),
+		C.GoString(command),
+		C.GoString(optionsJSON),
+	))
+}
+
+//export WaGitPoll
+func WaGitPoll(jobID C.longlong) *C.char {
+	return C.CString(gitjobs.Poll(int64(jobID)))
+}
+
+//export WaGitCancel
+func WaGitCancel(jobID C.longlong) C.int {
+	if gitjobs.Cancel(int64(jobID)) {
+		return 1
+	}
+	return 0
+}
+
+//export WaGitDispose
+func WaGitDispose(jobID C.longlong) C.int {
+	if gitjobs.Dispose(int64(jobID)) {
+		return 1
+	}
+	return 0
+}
+
+func main() {}

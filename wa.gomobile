@@ -9,6 +9,7 @@ import (
 	"wa-lang.org/wa/internal/backends/compiler_wat"
 	"wa-lang.org/wa/internal/config"
 	"wa-lang.org/wa/internal/format"
+	"wa-lang.org/wa/internal/gitjobs"
 	"wa-lang.org/wa/internal/loader"
 	"wa-lang.org/wa/internal/wat/watutil"
 	"wa-lang.org/wa/internal/wat/watutil/watstrip"
@@ -31,7 +32,7 @@ func buildApp(input string) (err error) {
 		return fmt.Errorf("%q is invalid wa moudle", input)
 	}
 
-	outfile := filepath.Join(input, manifest.Pkg.Name + ".wasm")
+	outfile := filepath.Join(input, manifest.Pkg.Name+".wasm")
 
 	manifest.Pkg.Target = config.WaOS_wasi
 
@@ -112,3 +113,26 @@ func WaFormat(input string) string {
 	return ""
 }
 
+func WaGitStartClone(url string, path string, branch string, token string, depth int) int64 {
+	return gitjobs.StartClone(url, path, branch, token, depth)
+}
+
+func WaGitStartPull(path string, branch string, token string, force bool) int64 {
+	return gitjobs.StartPull(path, branch, token, force)
+}
+
+func WaGitRun(repoPath string, command string, optionsJSON string) int64 {
+	return gitjobs.StartRun(repoPath, command, optionsJSON)
+}
+
+func WaGitPoll(jobID int64) string {
+	return gitjobs.Poll(jobID)
+}
+
+func WaGitCancel(jobID int64) bool {
+	return gitjobs.Cancel(jobID)
+}
+
+func WaGitDispose(jobID int64) bool {
+	return gitjobs.Dispose(jobID)
+}
