@@ -82,7 +82,7 @@ build-x86:
 	  -e CGO_ENABLED=1 \
 	  -e GOOS=linux \
 	  -e GOARCH=amd64 \
-	  -e GOPROXY=https://goproxy.io,direct \
+	  -e GOPROXY=https://mirrors.aliyun.com/goproxy/,direct \
 	  $(GO_IMAGE) \
 	  sh -c "go build -buildmode=c-archive -ldflags='-s -w' -o libwa.a"
 	cp libwa.a ../Dora-SSR/Source/3rdParty/Wa/Lib/Linux/amd64/

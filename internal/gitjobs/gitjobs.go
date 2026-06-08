@@ -219,7 +219,7 @@ func runJob(j *job) {
 		return
 	}
 	switch j.kind {
-	case "add", "branch", "checkout", "clean", "commit", "fetch", "init", "log", "ls-remote", "mv", "push", "remote", "reset", "restore", "rm", "status", "tag":
+	case "add", "branch", "checkout", "clean", "commit", "diff", "fetch", "init", "log", "ls-remote", "mv", "push", "remote", "reset", "restore", "rm", "status", "tag":
 		runCommand(j.ctx, j)
 	case "clone":
 		if j.req.cmd.command != "" {

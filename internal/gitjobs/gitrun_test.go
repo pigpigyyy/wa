@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
@@ -31,6 +32,43 @@ func TestGitRunLocalWorkflow(t *testing.T) {
 		t.Fatalf("expected clean clone, got %#v", data)
 	}
 
+	writeFile(t, filepath.Join(dest, "README.md"), "hello\nworking\n")
+	diff := resultData(t, waitRun(t, dest, "git diff -- README.md", ""))
+	if diff["oldText"] != "hello\n" || diff["newText"] != "hello\nworking\n" {
+		t.Fatalf("unexpected unstaged diff content: %#v", diff)
+	}
+	waitRun(t, dest, "git add README.md", "")
+	stagedDiff := resultData(t, waitRun(t, dest, "git diff --staged -- README.md", ""))
+	if stagedDiff["oldText"] != "hello\n" || stagedDiff["newText"] != "hello\nworking\n" {
+		t.Fatalf("unexpected staged diff content: %#v", stagedDiff)
+	}
+	waitRun(t, dest, `git commit -m "Update readme"`, "")
+
+	writeFile(t, filepath.Join(dest, "new.txt"), "new file\n")
+	untrackedDiff := resultData(t, waitRun(t, dest, "git diff -- new.txt", ""))
+	if untrackedDiff["oldText"] != "" || untrackedDiff["newText"] != "new file\n" {
+		t.Fatalf("unexpected untracked diff content: %#v", untrackedDiff)
+	}
+	writeFile(t, filepath.Join(dest, "large.txt"), strings.Repeat("x", maxPreviewDiffBytes+1))
+	largeDiff := resultData(t, waitRun(t, dest, "git diff -- large.txt", ""))
+	if largeDiff["mode"] != "large" || largeDiff["newText"] != nil {
+		t.Fatalf("expected large diff to skip text preview, got %#v", largeDiff)
+	}
+	if err := os.Remove(filepath.Join(dest, "large.txt")); err != nil {
+		t.Fatal(err)
+	}
+	binaryPath := filepath.Join(dest, "binary.bin")
+	if err := os.WriteFile(binaryPath, []byte{0, 1, 2, 3}, 0666); err != nil {
+		t.Fatal(err)
+	}
+	binaryDiff := resultData(t, waitRun(t, dest, "git diff -- binary.bin", ""))
+	if binaryDiff["mode"] != "binary" || binaryDiff["oldSize"] != float64(0) || binaryDiff["newSize"] != float64(4) {
+		t.Fatalf("expected binary diff size metadata, got %#v", binaryDiff)
+	}
+	if err := os.Remove(binaryPath); err != nil {
+		t.Fatal(err)
+	}
+
 	writeFile(t, filepath.Join(dest, "Assets", "Main.wa"), "func main {}\n")
 	waitRun(t, dest, "git add .", "")
 	commit := waitRun(t, dest, `git commit -m "Add Wa entry" --author-name Dora --author-email dora@example.com`, "")
@@ -44,6 +82,14 @@ func TestGitRunLocalWorkflow(t *testing.T) {
 	if len(commits) != 2 {
 		t.Fatalf("expected 2 commits, got %#v", commits)
 	}
+	latestCommit := commits[0].(map[string]any)
+	if !containsCommitFile(latestCommit["files"], "Assets/Main.wa", "A") {
+		t.Fatalf("expected latest commit files to include Assets/Main.wa add, got %#v", latestCommit["files"])
+	}
+	commitDiff := resultData(t, waitRun(t, dest, "git diff "+commitHash+" -- Assets/Main.wa", ""))
+	if commitDiff["oldText"] != "" || commitDiff["newText"] != "func main {}\n" {
+		t.Fatalf("unexpected commit diff content: %#v", commitDiff)
+	}
 
 	waitRun(t, dest, "git reset --hard "+sourceHead+" --confirm", "")
 	if _, err := os.Stat(filepath.Join(dest, "Assets", "Main.wa")); !os.IsNotExist(err) {
@@ -55,6 +101,15 @@ func TestGitRunLocalWorkflow(t *testing.T) {
 	if !containsNamedItem(resultData(t, branchResult)["branches"], "docs") {
 		t.Fatalf("expected branch list to include docs, got %#v", resultData(t, branchResult))
 	}
+	if !containsRemoteBranch(resultData(t, branchResult)["branches"], "origin", "master") {
+		t.Fatalf("expected branch list to include origin/master, got %#v", resultData(t, branchResult))
+	}
+	waitRun(t, dest, "git checkout origin/master", "")
+	waitRun(t, dest, "git checkout master", "")
+	waitRun(t, dest, "git checkout -b remote-main origin/master", "")
+	assertBranchUpstream(t, dest, "remote-main", "origin", "refs/heads/master")
+	waitRun(t, dest, "git checkout master", "")
+	waitRun(t, dest, "git branch -d remote-main", "")
 	waitRun(t, dest, "git branch -d docs", "")
 	branchResult = waitRun(t, dest, "git branch", "")
 	if containsNamedItem(resultData(t, branchResult)["branches"], "docs") {
@@ -130,6 +185,11 @@ func TestGitRunLocalWorkflow(t *testing.T) {
 	}
 	writeFile(t, moveTo, "staged change\n")
 	waitRun(t, dest, `git add "move to.txt"`, "")
+	statusResult := waitRun(t, dest, "git status", "")
+	statusFiles := resultData(t, statusResult)["files"].([]any)
+	if !containsStatus(statusFiles, "move to.txt", "M", " ") {
+		t.Fatalf("expected modified file to be staged, got %#v", statusFiles)
+	}
 	waitRun(t, dest, `git restore --staged "move to.txt"`, "")
 	waitRun(t, dest, `git restore "move to.txt"`, "")
 
@@ -211,6 +271,24 @@ func TestGitRunPushAndPull(t *testing.T) {
 		t.Fatalf("pull did not update clone-b README: %q", string(content))
 	}
 
+	waitRun(t, cloneA, "git checkout -b topic", "")
+	writeFile(t, filepath.Join(cloneA, "topic.txt"), "topic\n")
+	waitRun(t, cloneA, "git add topic.txt", "")
+	waitRun(t, cloneA, `git commit -m "Add topic"`, "")
+	upstreamResult := waitRun(t, cloneA, "git push -u origin topic", "")
+	upstream := resultData(t, upstreamResult)["upstream"].(map[string]any)
+	if upstream["branch"] != "topic" || upstream["remote"] != "origin" || upstream["merge"] != "refs/heads/topic" {
+		t.Fatalf("expected push -u to report upstream config, got %#v", upstream)
+	}
+	assertBranchUpstream(t, cloneA, "topic", "origin", "refs/heads/topic")
+
+	waitRun(t, cloneA, "git checkout -b docs", "")
+	writeFile(t, filepath.Join(cloneA, "docs.txt"), "docs\n")
+	waitRun(t, cloneA, "git add docs.txt", "")
+	waitRun(t, cloneA, `git commit -m "Add docs"`, "")
+	waitRun(t, cloneA, "git push --set-upstream origin docs", "")
+	assertBranchUpstream(t, cloneA, "docs", "origin", "refs/heads/docs")
+
 	lsRemote := waitRun(t, root, "git ls-remote "+quoteArg(remote), "")
 	if !containsRefName(resultData(t, lsRemote)["refs"], "refs/heads/master") {
 		t.Fatalf("expected ls-remote refs to include master, got %#v", resultData(t, lsRemote))
@@ -240,13 +318,106 @@ func TestGitRunInit(t *testing.T) {
 	}
 }
 
+func TestGitRunRestoreStagedOnUnbornBranch(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "unborn")
+	waitRun(t, repo, "git init", "")
+	writeFile(t, filepath.Join(repo, "hello.txt"), "hello\n")
+	waitRun(t, repo, "git add hello.txt", "")
+
+	stagedStatus := resultData(t, waitRun(t, repo, "git status", ""))
+	if !containsStatus(stagedStatus["files"], "hello.txt", "A", " ") {
+		t.Fatalf("expected hello.txt to be staged before restore, got %#v", stagedStatus)
+	}
+
+	waitRun(t, repo, "git restore --staged hello.txt", "")
+	unstagedStatus := resultData(t, waitRun(t, repo, "git status", ""))
+	if !containsStatus(unstagedStatus["files"], "hello.txt", "?", "?") {
+		t.Fatalf("expected hello.txt to be untracked after restore --staged, got %#v", unstagedStatus)
+	}
+}
+
+func TestGitRunBranchCreateOnUnbornBranch(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "unborn-branch")
+	waitRun(t, repo, "git init", "")
+	result := waitRun(t, repo, "git branch feature", "")
+	data := resultData(t, result)
+	if data["branch"] != "feature" || data["unborn"] != true {
+		t.Fatalf("expected unborn branch creation result, got %#v", data)
+	}
+
+	branchData := resultData(t, waitRun(t, repo, "git branch", ""))
+	if branchData["current"] != "feature" {
+		t.Fatalf("expected current unborn branch to be feature, got %#v", branchData)
+	}
+
+	writeFile(t, filepath.Join(repo, "hello.txt"), "hello\n")
+	waitRun(t, repo, "git add hello.txt", "")
+	waitRun(t, repo, `git commit -m "initial"`, "")
+	branchData = resultData(t, waitRun(t, repo, "git branch", ""))
+	if branchData["current"] != "feature" || !containsNamedItem(branchData["branches"], "feature") {
+		t.Fatalf("expected first commit to land on feature, got %#v", branchData)
+	}
+}
+
+func TestGitRunCheckoutCreateOnUnbornBranch(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "unborn-checkout")
+	waitRun(t, repo, "git init", "")
+	result := waitRun(t, repo, "git checkout -b feature", "")
+	data := resultData(t, result)
+	if data["branch"] != "feature" || data["unborn"] != true {
+		t.Fatalf("expected unborn checkout branch result, got %#v", data)
+	}
+
+	branchData := resultData(t, waitRun(t, repo, "git branch", ""))
+	if branchData["current"] != "feature" {
+		t.Fatalf("expected current unborn branch to be feature, got %#v", branchData)
+	}
+}
+
+func TestGitRunLogOnUnbornBranchReturnsEmpty(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "unborn-log")
+	waitRun(t, repo, "git init", "")
+	data := resultData(t, waitRun(t, repo, "git log -n 5", ""))
+	commits, ok := data["commits"].([]any)
+	if !ok || len(commits) != 0 {
+		t.Fatalf("expected empty commit list on unborn branch, got %#v", data)
+	}
+}
+
+func TestGitRunUnbornHeadClearErrors(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "unborn-errors")
+	waitRun(t, repo, "git init", "")
+
+	result := waitRunError(t, repo, "git push origin master", "")
+	if !strings.Contains(result.Error, "cannot push before first commit") {
+		t.Fatalf("expected clear unborn push error, got %#v", result)
+	}
+
+	result = waitRunError(t, repo, "git restore README.md", "")
+	if !strings.Contains(result.Error, "cannot restore worktree before first commit") {
+		t.Fatalf("expected clear unborn restore error, got %#v", result)
+	}
+}
+
+func TestGitRunTagCreateOnUnbornBranchReturnsClearError(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "unborn-tag")
+	waitRun(t, repo, "git init", "")
+
+	result := waitRunError(t, repo, "git tag v1", "")
+	if !strings.Contains(result.Error, "cannot create tag before first commit") {
+		t.Fatalf("expected clear unborn tag error, got %#v", result)
+	}
+
+	result = waitRunError(t, repo, `git tag -a v2 -m "Version 2"`, "")
+	if !strings.Contains(result.Error, "cannot create tag before first commit") {
+		t.Fatalf("expected clear unborn annotated tag error, got %#v", result)
+	}
+}
+
 func TestGitRunRejectsShellSyntax(t *testing.T) {
 	repo := filepath.Join(t.TempDir(), "repo")
 	initRepository(t, repo, "README.md", "hello\n", "initial")
-	result := waitRun(t, repo, "git status && git push", "")
-	if result.State != StateError {
-		t.Fatalf("expected shell syntax rejection, got %#v", result)
-	}
+	waitRunError(t, repo, "git status && git push", "")
 }
 
 func waitRun(t *testing.T, repoPath, command, options string) pollResult {
@@ -264,10 +435,31 @@ func waitRun(t *testing.T, repoPath, command, options string) pollResult {
 			return result
 		case StateError, StateCanceled:
 			Dispose(id)
-			if command == "git status && git push" {
-				return result
-			}
 			t.Fatalf("%s failed: %s", command, result.Error)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s timed out with state %s", command, result.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitRunError(t *testing.T, repoPath, command, options string) pollResult {
+	t.Helper()
+	id := StartRun(repoPath, command, options)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var result pollResult
+		if err := json.Unmarshal([]byte(Poll(id)), &result); err != nil {
+			t.Fatal(err)
+		}
+		switch result.State {
+		case StateError, StateCanceled:
+			Dispose(id)
+			return result
+		case StateDone:
+			Dispose(id)
+			t.Fatalf("expected %s to fail, got %#v", command, result)
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("%s timed out with state %s", command, result.State)
@@ -296,6 +488,76 @@ func containsNamedItem(value any, name string) bool {
 			continue
 		}
 		if data["name"] == name {
+			return true
+		}
+	}
+	return false
+}
+
+func containsRemoteBranch(value any, remote, name string) bool {
+	items, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		data, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if data["remote"] == remote && data["name"] == name {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCommitFile(value any, path, status string) bool {
+	items, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		data, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if data["path"] == path && data["status"] == status {
+			return true
+		}
+	}
+	return false
+}
+
+func assertBranchUpstream(t *testing.T, repoPath, branch, remote, merge string) {
+	t.Helper()
+	repo, err := git.PlainOpen(repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := repo.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	branchConfig := cfg.Branches[branch]
+	if branchConfig == nil {
+		t.Fatalf("expected branch config for %s, got %#v", branch, cfg.Branches)
+	}
+	if branchConfig.Remote != remote || branchConfig.Merge != plumbing.ReferenceName(merge) {
+		t.Fatalf("expected %s to track %s/%s, got %#v", branch, remote, merge, branchConfig)
+	}
+}
+
+func containsStatus(value any, path, staging, worktree string) bool {
+	items, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		data, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if data["path"] == path && data["staging"] == staging && data["worktree"] == worktree {
 			return true
 		}
 	}

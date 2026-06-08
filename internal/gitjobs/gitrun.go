@@ -11,15 +11,19 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/format/index"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/memory"
 )
+
+const maxPreviewDiffBytes = 1024 * 1024
 
 type commandRequest struct {
 	repoPath   string
@@ -63,6 +67,7 @@ type gitCommand struct {
 	staged      bool
 	worktree    bool
 	confirm     bool
+	setUpstream bool
 	resetMode   git.ResetMode
 }
 
@@ -122,6 +127,8 @@ func parseGitCommand(repoPath, command string) (gitCommand, error) {
 		return parseLsRemote(args[1:])
 	case "status":
 		return gitCommand{op: "status"}, noExtraArgs("status", args[1:])
+	case "diff":
+		return parseDiff(args[1:])
 	case "add":
 		return parseAdd(args[1:])
 	case "rm":
@@ -270,6 +277,35 @@ func parseLsRemote(args []string) (gitCommand, error) {
 	return gitCommand{op: "ls-remote", url: args[0]}, nil
 }
 
+func parseDiff(args []string) (gitCommand, error) {
+	cmd := gitCommand{op: "diff"}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--cached", "--staged":
+			cmd.staged = true
+		case "--":
+			cmd.paths = append(cmd.paths, args[i+1:]...)
+			i = len(args)
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return cmd, fmt.Errorf("unsupported diff option %q", args[i])
+			}
+			if cmd.target == "" && len(cmd.paths) == 0 && i+1 < len(args) && args[i+1] == "--" {
+				cmd.target = args[i]
+				continue
+			}
+			cmd.paths = append(cmd.paths, args[i])
+		}
+	}
+	if len(cmd.paths) != 1 {
+		return cmd, errors.New("diff requires exactly one path")
+	}
+	if err := validateRelativeGitPath(cmd.paths[0]); err != nil {
+		return cmd, err
+	}
+	return cmd, nil
+}
+
 func parseAdd(args []string) (gitCommand, error) {
 	cmd := gitCommand{op: "add"}
 	for _, arg := range args {
@@ -377,15 +413,20 @@ func parseFetch(args []string) (gitCommand, error) {
 
 func parsePush(args []string) (gitCommand, error) {
 	cmd := gitCommand{op: "push", remote: "origin"}
-	return parseRemoteBranchForce(cmd, args)
+	return parseRemoteBranchForce(cmd, args, true)
 }
 
-func parseRemoteBranchForce(cmd gitCommand, args []string) (gitCommand, error) {
+func parseRemoteBranchForce(cmd gitCommand, args []string, allowSetUpstream ...bool) (gitCommand, error) {
 	remoteSet := false
 	for _, arg := range args {
 		switch arg {
 		case "--force", "-f":
 			cmd.force = true
+		case "--set-upstream", "-u":
+			if len(allowSetUpstream) == 0 || !allowSetUpstream[0] {
+				return cmd, fmt.Errorf("unsupported %s option %q", cmd.op, arg)
+			}
+			cmd.setUpstream = true
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return cmd, fmt.Errorf("unsupported %s option %q", cmd.op, arg)
@@ -690,6 +731,8 @@ func runCommand(ctx context.Context, j *job) {
 		data, err = execLsRemote(j, cmd)
 	case "status":
 		data, err = execStatus(j.req.cmd.repoPath)
+	case "diff":
+		data, err = execDiff(j.req.cmd.repoPath, cmd)
 	case "add":
 		data, err = execAdd(j.req.cmd.repoPath, cmd)
 	case "rm":
@@ -829,12 +872,115 @@ func execStatus(repoPath string) (map[string]any, error) {
 	return map[string]any{"clean": status.IsClean(), "files": files}, nil
 }
 
+func execDiff(repoPath string, cmd gitCommand) (map[string]any, error) {
+	repo, _, err := openWorktree(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	path := cmd.paths[0]
+	if cmd.target != "" {
+		return execCommitFileDiff(repo, cmd.target, path)
+	}
+	statusData, err := execStatus(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	fileStatus, ok := statusForPath(statusData["files"], path)
+	if !ok {
+		return map[string]any{"path": path, "staged": cmd.staged, "mode": "empty", "oldText": "", "newText": ""}, nil
+	}
+	var oldBytes, newBytes []byte
+	if cmd.staged {
+		if fileStatus["staging"] == " " || fileStatus["staging"] == "" {
+			return map[string]any{"path": path, "staged": true, "mode": "empty", "oldText": "", "newText": ""}, nil
+		}
+		oldBytes, err = readHeadFile(repo, path)
+		if err != nil && !errors.Is(err, plumbing.ErrReferenceNotFound) && !errors.Is(err, object.ErrFileNotFound) {
+			return nil, err
+		}
+		newBytes, err = readIndexFile(repo, path)
+		if err != nil && !errors.Is(err, index.ErrEntryNotFound) {
+			return nil, err
+		}
+	} else {
+		if fileStatus["worktree"] == " " || fileStatus["worktree"] == "" {
+			return map[string]any{"path": path, "staged": false, "mode": "empty", "oldText": "", "newText": ""}, nil
+		}
+		oldBytes, err = readIndexFile(repo, path)
+		if err != nil && !errors.Is(err, index.ErrEntryNotFound) {
+			return nil, err
+		}
+		newBytes, err = os.ReadFile(filepath.Join(repoPath, filepath.Clean(path)))
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
+	if isProbablyBinary(oldBytes) || isProbablyBinary(newBytes) {
+		return map[string]any{"path": path, "staged": cmd.staged, "mode": "binary", "binary": true, "oldSize": len(oldBytes), "newSize": len(newBytes)}, nil
+	}
+	if len(oldBytes)+len(newBytes) > maxPreviewDiffBytes {
+		return map[string]any{"path": path, "staged": cmd.staged, "mode": "large", "message": "File is too large to preview"}, nil
+	}
+	mode := "diff"
+	if string(oldBytes) == string(newBytes) {
+		mode = "empty"
+	}
+	return map[string]any{
+		"path":    path,
+		"staged":  cmd.staged,
+		"mode":    mode,
+		"oldText": string(oldBytes),
+		"newText": string(newBytes),
+	}, nil
+}
+
+func execCommitFileDiff(repo *git.Repository, commitHash, path string) (map[string]any, error) {
+	commit, err := repo.CommitObject(plumbing.NewHash(commitHash))
+	if err != nil {
+		return nil, err
+	}
+	var parent *object.Commit
+	parentIter := commit.Parents()
+	parent, err = parentIter.Next()
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	oldBytes := []byte{}
+	if parent != nil {
+		oldBytes, err = readCommitFile(parent, path)
+		if err != nil && !errors.Is(err, object.ErrFileNotFound) {
+			return nil, err
+		}
+	}
+	newBytes, err := readCommitFile(commit, path)
+	if err != nil && !errors.Is(err, object.ErrFileNotFound) {
+		return nil, err
+	}
+	if isProbablyBinary(oldBytes) || isProbablyBinary(newBytes) {
+		return map[string]any{"path": path, "commit": commitHash, "mode": "binary", "binary": true, "oldSize": len(oldBytes), "newSize": len(newBytes)}, nil
+	}
+	if len(oldBytes)+len(newBytes) > maxPreviewDiffBytes {
+		return map[string]any{"path": path, "commit": commitHash, "mode": "large", "message": "File is too large to preview"}, nil
+	}
+	mode := "diff"
+	if string(oldBytes) == string(newBytes) {
+		mode = "empty"
+	}
+	return map[string]any{
+		"path":    path,
+		"commit":  commitHash,
+		"mode":    mode,
+		"oldText": string(oldBytes),
+		"newText": string(newBytes),
+	}, nil
+}
+
 func execAdd(repoPath string, cmd gitCommand) (map[string]any, error) {
 	_, worktree, err := openWorktree(repoPath)
 	if err != nil {
 		return nil, err
 	}
-	if cmd.all {
+	if cmd.all && len(cmd.paths) == 0 {
 		if err := worktree.AddWithOptions(&git.AddOptions{All: true}); err != nil {
 			return nil, err
 		}
@@ -853,7 +999,7 @@ func execAdd(repoPath string, cmd gitCommand) (map[string]any, error) {
 			}
 			continue
 		}
-		if _, err := worktree.Add(p); err != nil {
+		if err := worktree.AddWithOptions(&git.AddOptions{Path: p, All: cmd.all}); err != nil {
 			return nil, err
 		}
 	}
@@ -948,6 +1094,9 @@ func execPush(ctx context.Context, j *job, cmd gitCommand) (map[string]any, erro
 	if err != nil {
 		return nil, err
 	}
+	if isUnbornHead(repo) {
+		return nil, errors.New("cannot push before first commit")
+	}
 	opts := &git.PushOptions{
 		RemoteName: cmd.remote,
 		Force:      cmd.force,
@@ -960,9 +1109,62 @@ func execPush(ctx context.Context, j *job, cmd gitCommand) (map[string]any, erro
 	}
 	err = repo.PushContext(ctx, opts)
 	if errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return map[string]any{"upToDate": true}, nil
+		data := map[string]any{"upToDate": true}
+		if cmd.setUpstream {
+			upstream, err := setPushUpstream(repo, cmd)
+			if err != nil {
+				return nil, err
+			}
+			data["upstream"] = upstream
+		}
+		return data, nil
 	}
-	return nil, err
+	if err != nil {
+		return nil, err
+	}
+	data := map[string]any{}
+	if cmd.setUpstream {
+		upstream, err := setPushUpstream(repo, cmd)
+		if err != nil {
+			return nil, err
+		}
+		data["upstream"] = upstream
+	}
+	return data, nil
+}
+
+func setPushUpstream(repo *git.Repository, cmd gitCommand) (map[string]any, error) {
+	localBranch := cmd.branch
+	if localBranch == "" {
+		localBranch = currentBranchName(repo)
+	}
+	if localBranch == "" {
+		return nil, errors.New("cannot set upstream without a current branch")
+	}
+	remoteBranch := cmd.branch
+	if remoteBranch == "" {
+		remoteBranch = localBranch
+	}
+	return setBranchUpstream(repo, localBranch, cmd.remote, remoteBranch)
+}
+
+func setBranchUpstream(repo *git.Repository, localBranch, remote, remoteBranch string) (map[string]any, error) {
+	cfg, err := repo.Config()
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Branches == nil {
+		cfg.Branches = make(map[string]*config.Branch)
+	}
+	cfg.Branches[localBranch] = &config.Branch{
+		Name:   localBranch,
+		Remote: remote,
+		Merge:  plumbingBranch(remoteBranch),
+	}
+	if err := repo.SetConfig(cfg); err != nil {
+		return nil, err
+	}
+	return map[string]any{"branch": localBranch, "remote": remote, "merge": plumbingBranch(remoteBranch).String()}, nil
 }
 
 func execLog(repoPath string, cmd gitCommand) (map[string]any, error) {
@@ -976,6 +1178,9 @@ func execLog(repoPath string, cmd gitCommand) (map[string]any, error) {
 		opts.FileName = &path
 	}
 	iter, err := repo.Log(opts)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return map[string]any{"commits": []map[string]any{}}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -986,12 +1191,17 @@ func execLog(repoPath string, cmd gitCommand) (map[string]any, error) {
 		if limit <= 0 {
 			return storerStop
 		}
+		files, err := commitChangedFiles(c)
+		if err != nil {
+			return err
+		}
 		commits = append(commits, map[string]any{
 			"hash":    c.Hash.String(),
 			"message": strings.TrimSpace(c.Message),
 			"author":  c.Author.Name,
 			"email":   c.Author.Email,
 			"when":    c.Author.When.Format(time.RFC3339),
+			"files":   files,
 		})
 		limit--
 		return nil
@@ -1002,6 +1212,57 @@ func execLog(repoPath string, cmd gitCommand) (map[string]any, error) {
 	return map[string]any{"commits": commits}, err
 }
 
+func commitChangedFiles(commit *object.Commit) ([]map[string]any, error) {
+	parentIter := commit.Parents()
+	parent, err := parentIter.Next()
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	var files []map[string]any
+	if parent == nil {
+		tree, err := commit.Tree()
+		if err != nil {
+			return nil, err
+		}
+		err = tree.Files().ForEach(func(file *object.File) error {
+			files = append(files, map[string]any{"path": file.Name, "status": "A"})
+			return nil
+		})
+		return files, err
+	}
+	parentTree, err := parent.Tree()
+	if err != nil {
+		return nil, err
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil, err
+	}
+	changes, err := parentTree.Diff(tree)
+	if err != nil {
+		return nil, err
+	}
+	for _, change := range changes {
+		action, err := change.Action()
+		if err != nil {
+			return nil, err
+		}
+		path := change.To.Name
+		status := "M"
+		switch action.String() {
+		case "Insert":
+			status = "A"
+		case "Delete":
+			status = "D"
+			path = change.From.Name
+		default:
+			status = "M"
+		}
+		files = append(files, map[string]any{"path": path, "status": status})
+	}
+	return files, nil
+}
+
 var storerStop = errors.New("stop commit iteration")
 
 func execCheckout(repoPath string, cmd gitCommand) (map[string]any, error) {
@@ -1009,13 +1270,44 @@ func execCheckout(repoPath string, cmd gitCommand) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cmd.create && isUnbornHead(repo) {
+		refName := plumbingBranch(cmd.branch)
+		if _, err := repo.Reference(refName, false); err == nil {
+			return nil, git.ErrBranchExists
+		} else if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+			return nil, err
+		}
+		if err := repo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, refName)); err != nil {
+			return nil, err
+		}
+		return map[string]any{"branch": cmd.branch, "unborn": true}, nil
+	}
 	opts := &git.CheckoutOptions{Create: cmd.create, Force: cmd.force}
 	if cmd.create {
 		opts.Branch = plumbingBranch(cmd.branch)
+		if cmd.target != "" {
+			hash, _, _, err := checkoutStartPoint(repo, cmd.target)
+			if err != nil {
+				return nil, err
+			}
+			opts.Hash = hash
+		}
 	} else if hash, ok := parseHash(cmd.target); ok {
 		opts.Hash = hash
 	} else {
-		opts.Branch = plumbingBranch(cmd.target)
+		branchRef := plumbingBranch(cmd.target)
+		if _, err := repo.Reference(branchRef, false); err == nil {
+			opts.Branch = branchRef
+		} else if errors.Is(err, plumbing.ErrReferenceNotFound) {
+			remoteRef := plumbing.ReferenceName("refs/remotes/" + cmd.target)
+			if ref, err := repo.Reference(remoteRef, true); err == nil {
+				opts.Hash = ref.Hash()
+			} else {
+				opts.Branch = branchRef
+			}
+		} else {
+			return nil, err
+		}
 	}
 	if !opts.Hash.IsZero() {
 		if _, err := repo.CommitObject(opts.Hash); err != nil {
@@ -1025,8 +1317,38 @@ func execCheckout(repoPath string, cmd gitCommand) (map[string]any, error) {
 	if err := worktree.Checkout(opts); err != nil {
 		return nil, err
 	}
+	if cmd.create && cmd.target != "" {
+		if _, remote, remoteBranch, err := checkoutStartPoint(repo, cmd.target); err == nil && remote != "" && remoteBranch != "" {
+			if _, err := setBranchUpstream(repo, cmd.branch, remote, remoteBranch); err != nil {
+				return nil, err
+			}
+		}
+	}
 	head, _ := repo.Head()
 	return hashData(head), nil
+}
+
+func checkoutStartPoint(repo *git.Repository, target string) (plumbing.Hash, string, string, error) {
+	if hash, ok := parseHash(target); ok {
+		return hash, "", "", nil
+	}
+	branchRef := plumbingBranch(target)
+	if ref, err := repo.Reference(branchRef, true); err == nil {
+		return ref.Hash(), "", "", nil
+	} else if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return plumbing.ZeroHash, "", "", err
+	}
+	remoteTarget := strings.TrimPrefix(target, "refs/remotes/")
+	remoteRef := plumbing.ReferenceName("refs/remotes/" + remoteTarget)
+	ref, err := repo.Reference(remoteRef, true)
+	if err != nil {
+		return plumbing.ZeroHash, "", "", err
+	}
+	remote, branch, ok := strings.Cut(remoteTarget, "/")
+	if !ok || remote == "" || branch == "" {
+		return plumbing.ZeroHash, "", "", fmt.Errorf("invalid remote branch %q", target)
+	}
+	return ref.Hash(), remote, branch, nil
 }
 
 func execReset(repoPath string, cmd gitCommand) (map[string]any, error) {
@@ -1056,12 +1378,22 @@ func execRestore(repoPath string, cmd gitCommand) (map[string]any, error) {
 			Worktree: cmd.worktree,
 			Files:    cmd.paths,
 		}); err != nil {
+			if errors.Is(err, plumbing.ErrReferenceNotFound) && !cmd.worktree {
+				if indexErr := unstageFromUnbornIndex(repo, cmd.paths); indexErr == nil {
+					return map[string]any{"paths": cmd.paths, "staged": true, "worktree": false}, nil
+				} else {
+					return nil, indexErr
+				}
+			}
 			return nil, err
 		}
 		return map[string]any{"paths": cmd.paths, "staged": true, "worktree": cmd.worktree}, nil
 	}
 	head, err := repo.Head()
 	if err != nil {
+		if errors.Is(err, plumbing.ErrReferenceNotFound) {
+			return nil, errors.New("cannot restore worktree before first commit")
+		}
 		return nil, err
 	}
 	commit, err := repo.CommitObject(head.Hash())
@@ -1080,6 +1412,19 @@ func execRestore(repoPath string, cmd gitCommand) (map[string]any, error) {
 	return map[string]any{"paths": cmd.paths, "staged": false, "worktree": true}, nil
 }
 
+func unstageFromUnbornIndex(repo *git.Repository, paths []string) error {
+	idx, err := repo.Storer.Index()
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if _, err := idx.Remove(path); err != nil {
+			return err
+		}
+	}
+	return repo.Storer.SetIndex(idx)
+}
+
 func execClean(repoPath string) (map[string]any, error) {
 	_, worktree, err := openWorktree(repoPath)
 	if err != nil {
@@ -1095,7 +1440,18 @@ func execBranch(repoPath string, cmd gitCommand) (map[string]any, error) {
 	}
 	if cmd.create {
 		head, err := repo.Head()
-		if err != nil {
+		if errors.Is(err, plumbing.ErrReferenceNotFound) {
+			refName := plumbing.NewBranchReferenceName(cmd.branch)
+			if _, err := repo.Reference(refName, false); err == nil {
+				return nil, git.ErrBranchExists
+			} else if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+				return nil, err
+			}
+			if err := repo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, refName)); err != nil {
+				return nil, err
+			}
+			return map[string]any{"branch": cmd.branch, "unborn": true}, nil
+		} else if err != nil {
 			return nil, err
 		}
 		refName := plumbing.NewBranchReferenceName(cmd.branch)
@@ -1124,11 +1480,7 @@ func execBranch(repoPath string, cmd gitCommand) (map[string]any, error) {
 		return map[string]any{"branch": cmd.branch, "deleted": true}, nil
 	}
 
-	head, _ := repo.Head()
-	current := ""
-	if head != nil && head.Name().IsBranch() {
-		current = head.Name().Short()
-	}
+	current := currentBranchName(repo)
 	iter, err := repo.Branches()
 	if err != nil {
 		return nil, err
@@ -1144,7 +1496,51 @@ func execBranch(repoPath string, cmd gitCommand) (map[string]any, error) {
 		})
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	refIter, err := repo.References()
+	if err != nil {
+		return nil, err
+	}
+	defer refIter.Close()
+	err = refIter.ForEach(func(ref *plumbing.Reference) error {
+		if !ref.Name().IsRemote() {
+			return nil
+		}
+		short := ref.Name().Short()
+		remote, branch, ok := strings.Cut(short, "/")
+		if !ok || remote == "" || branch == "" || branch == "HEAD" {
+			return nil
+		}
+		branches = append(branches, map[string]any{
+			"name":   branch,
+			"hash":   ref.Hash().String(),
+			"remote": remote,
+		})
+		return nil
+	})
 	return map[string]any{"branches": branches, "current": current}, err
+}
+
+func currentBranchName(repo *git.Repository) string {
+	head, err := repo.Head()
+	if err == nil && head != nil && head.Name().IsBranch() {
+		return head.Name().Short()
+	}
+	head, err = repo.Storer.Reference(plumbing.HEAD)
+	if err == nil && head != nil && head.Target().IsBranch() {
+		return head.Target().Short()
+	}
+	return ""
+}
+
+func isUnbornHead(repo *git.Repository) bool {
+	if _, err := repo.Head(); !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return false
+	}
+	head, err := repo.Storer.Reference(plumbing.HEAD)
+	return err == nil && head != nil && head.Target().IsBranch()
 }
 
 func execTag(repoPath string, cmd gitCommand) (map[string]any, error) {
@@ -1160,7 +1556,9 @@ func execTag(repoPath string, cmd gitCommand) (map[string]any, error) {
 	}
 	if cmd.create {
 		head, err := repo.Head()
-		if err != nil {
+		if errors.Is(err, plumbing.ErrReferenceNotFound) {
+			return nil, errors.New("cannot create tag before first commit")
+		} else if err != nil {
 			return nil, err
 		}
 		var opts *git.CreateTagOptions
@@ -1188,13 +1586,26 @@ func execTag(repoPath string, cmd gitCommand) (map[string]any, error) {
 	defer iter.Close()
 	tags := []map[string]any{}
 	err = iter.ForEach(func(ref *plumbing.Reference) error {
+		hash := peelTagHash(repo, ref.Hash())
 		tags = append(tags, map[string]any{
 			"name": ref.Name().Short(),
-			"hash": ref.Hash().String(),
+			"hash": hash.String(),
+			"ref":  ref.Hash().String(),
 		})
 		return nil
 	})
 	return map[string]any{"tags": tags}, err
+}
+
+func peelTagHash(repo *git.Repository, hash plumbing.Hash) plumbing.Hash {
+	for i := 0; i < 8; i++ {
+		tag, err := repo.TagObject(hash)
+		if err != nil {
+			return hash
+		}
+		hash = tag.Target
+	}
+	return hash
 }
 
 func execRemote(repoPath string, cmd gitCommand) (map[string]any, error) {
@@ -1355,6 +1766,93 @@ func rejectDirectoryPath(repoPath, path, label string) error {
 		return fmt.Errorf("%s must be a single file", label)
 	}
 	return nil
+}
+
+func statusForPath(files any, path string) (map[string]string, bool) {
+	items, ok := files.([]map[string]string)
+	if !ok {
+		return nil, false
+	}
+	for _, file := range items {
+		if file["path"] == path {
+			return file, true
+		}
+	}
+	return nil, false
+}
+
+func readHeadFile(repo *git.Repository, path string) ([]byte, error) {
+	head, err := repo.Head()
+	if err != nil {
+		return nil, err
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return nil, err
+	}
+	file, err := commit.File(path)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := file.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
+func readCommitFile(commit *object.Commit, path string) ([]byte, error) {
+	file, err := commit.File(path)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := file.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
+func readIndexFile(repo *git.Repository, path string) ([]byte, error) {
+	idx, err := repo.Storer.Index()
+	if err != nil {
+		return nil, err
+	}
+	entry, err := idx.Entry(path)
+	if err != nil {
+		return nil, err
+	}
+	blob, err := object.GetBlob(repo.Storer, entry.Hash)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := blob.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
+func isProbablyBinary(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	if bytesContainNUL(data) {
+		return true
+	}
+	return !utf8.Valid(data)
+}
+
+func bytesContainNUL(data []byte) bool {
+	for _, b := range data {
+		if b == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func restoreWorktreePath(repoPath string, tree *object.Tree, path string) error {
