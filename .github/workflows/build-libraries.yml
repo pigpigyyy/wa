@@ -1,0 +1,221 @@
+name: Build Libraries
+
+on:
+  push:
+    branches:
+      - dora
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.24.3"
+
+jobs:
+  linux-amd64:
+    name: Linux amd64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build
+        run: |
+          mkdir -p artifacts/linux-amd64
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
+            go build -buildmode=c-archive -ldflags="-s -w" \
+            -o artifacts/linux-amd64/libwa.a .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wa-linux-amd64
+          path: artifacts/linux-amd64
+          if-no-files-found: error
+
+  linux-arm64:
+    name: Linux arm64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build
+        run: |
+          mkdir -p artifacts/linux-arm64
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 \
+            go build -buildmode=c-archive -ldflags="-s -w" \
+            -o artifacts/linux-arm64/libwa.a .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wa-linux-arm64
+          path: artifacts/linux-arm64
+          if-no-files-found: error
+
+  windows-x86:
+    name: Windows x86
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build
+        shell: cmd
+        run: |
+          mkdir artifacts\windows-x86
+          set CGO_ENABLED=1
+          set GOOS=windows
+          set GOARCH=386
+          set GOFLAGS=-buildvcs=false
+          go build -buildmode=c-shared -ldflags="-s -w" -o artifacts\windows-x86\wa.dll .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wa-windows-x86
+          path: artifacts/windows-x86
+          if-no-files-found: error
+
+  apple:
+    name: Apple libraries
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build macOS universal library
+        run: |
+          mkdir -p artifacts/macos
+
+          CGO_CFLAGS="-mmacosx-version-min=11.3" \
+          CGO_LDFLAGS="-mmacosx-version-min=11.3" \
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+            go build -buildmode=c-archive -ldflags="-s -w" -o macos-arm64.a .
+
+          CGO_CFLAGS="-mmacosx-version-min=11.3" \
+          CGO_LDFLAGS="-mmacosx-version-min=11.3" \
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+            go build -buildmode=c-archive -ldflags="-s -w" -o macos-amd64.a .
+
+          lipo -create macos-arm64.a macos-amd64.a -output artifacts/macos/libwa.a
+          mv macos-arm64.h artifacts/macos/wa.h
+
+      - name: Build iOS device library
+        run: |
+          mkdir -p artifacts/ios
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          GOOS=ios GOARCH=arm64 CGO_ENABLED=1 \
+          CGO_CFLAGS="-isysroot ${SDK_PATH} -miphoneos-version-min=13.0" \
+          CGO_LDFLAGS="-isysroot ${SDK_PATH} -miphoneos-version-min=13.0" \
+            go build -buildmode=c-archive -ldflags="-s -w" \
+            -o artifacts/ios/libwa.a .
+
+      - name: Build iOS simulator universal library
+        run: |
+          mkdir -p artifacts/ios-simulator
+          SDK_PATH="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+
+          GOOS=ios GOARCH=arm64 CGO_ENABLED=1 \
+          CGO_CFLAGS="-isysroot ${SDK_PATH} -mios-simulator-version-min=13.0" \
+          CGO_LDFLAGS="-isysroot ${SDK_PATH} -mios-simulator-version-min=13.0" \
+            go build -buildmode=c-archive -ldflags="-s -w" -o ios-simulator-arm64.a .
+
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 \
+          CGO_CFLAGS="-isysroot ${SDK_PATH} -mios-simulator-version-min=13.0" \
+          CGO_LDFLAGS="-isysroot ${SDK_PATH} -mios-simulator-version-min=13.0" \
+            go build -buildmode=c-archive -ldflags="-s -w" -o ios-simulator-amd64.a .
+
+          lipo -create ios-simulator-arm64.a ios-simulator-amd64.a \
+            -output artifacts/ios-simulator/libwa.a
+          mv ios-simulator-arm64.h artifacts/ios-simulator/wa.h
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wa-macos-universal
+          path: artifacts/macos
+          if-no-files-found: error
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wa-ios-arm64
+          path: artifacts/ios
+          if-no-files-found: error
+
+      - name: Upload iOS simulator artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wa-ios-simulator-universal
+          path: artifacts/ios-simulator
+          if-no-files-found: error
+
+  android:
+    name: Android
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20250606033058-a2a15c67f36f
+          gomobile init
+
+      - name: Build
+        run: |
+          mkdir -p artifacts/android
+          mv wa.gomobile wa.go
+          mv main.go main.cgo
+          gomobile bind -v -o wa.aar -target=android .
+          mkdir android-aar
+          unzip -q wa.aar -d android-aar
+          rm -rf android-aar/jni/x86
+          cd android-aar
+          zip -qr ../artifacts/android/wa.aar .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wa-android
+          path: artifacts/android
+          if-no-files-found: error
