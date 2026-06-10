@@ -85,26 +85,26 @@ jobs:
         with:
           msystem: MINGW32
           update: false
-          install: mingw-w64-i686-gcc mingw-w64-i686-tools
+          install: mingw-w64-i686-gcc
 
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x86
 
-      - name: Build
+      - name: Build DLL
+        shell: msys2 {0}
+        run: |
+          mkdir -p artifacts/windows-x86
+          CGO_ENABLED=1 GOOS=windows GOARCH=386 CC=gcc GOFLAGS=-buildvcs=false \
+            go build -buildmode=c-shared -ldflags="-s -w" \
+            -o artifacts/windows-x86/wa.dll .
+
+      - name: Build MSVC import library
         shell: cmd
         run: |
-          mkdir artifacts\windows-x86
-          set PATH=C:\msys64\mingw32\bin;%PATH%
-          set CGO_ENABLED=1
-          set GOOS=windows
-          set GOARCH=386
-          set CC=C:\msys64\mingw32\bin\gcc.exe
-          set GOFLAGS=-buildvcs=false
-          go build -buildmode=c-shared -ldflags="-s -w" -o artifacts\windows-x86\wa.dll .
+          copy wa.def artifacts\windows-x86\wa.def
           pushd artifacts\windows-x86
-          gendef.exe wa.dll
           lib.exe /def:wa.def /machine:x86 /out:wa.lib
           popd
 
