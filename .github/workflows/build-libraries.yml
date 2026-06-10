@@ -86,6 +86,7 @@ jobs:
           msystem: MINGW32
           update: false
           install: mingw-w64-i686-gcc
+          path-type: inherit
 
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
