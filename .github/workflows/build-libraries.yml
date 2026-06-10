@@ -80,15 +80,33 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      - name: Set up 32-bit MinGW
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW32
+          update: false
+          install: mingw-w64-i686-gcc mingw-w64-i686-tools
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
       - name: Build
         shell: cmd
         run: |
           mkdir artifacts\windows-x86
+          set PATH=C:\msys64\mingw32\bin;%PATH%
           set CGO_ENABLED=1
           set GOOS=windows
           set GOARCH=386
+          set CC=C:\msys64\mingw32\bin\gcc.exe
           set GOFLAGS=-buildvcs=false
           go build -buildmode=c-shared -ldflags="-s -w" -o artifacts\windows-x86\wa.dll .
+          pushd artifacts\windows-x86
+          gendef.exe wa.dll
+          lib.exe /def:wa.def /machine:x86 /out:wa.lib
+          popd
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -206,7 +224,7 @@ jobs:
           mkdir -p artifacts/android
           mv wa.gomobile wa.go
           mv main.go main.cgo
-          gomobile bind -v -o wa.aar -target=android .
+          gomobile bind -v -androidapi 21 -o wa.aar -target=android .
           mkdir android-aar
           unzip -q wa.aar -d android-aar
           rm -rf android-aar/jni/x86

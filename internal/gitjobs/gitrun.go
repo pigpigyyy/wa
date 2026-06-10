@@ -748,11 +748,11 @@ func runCommand(ctx context.Context, j *job) {
 	case "log":
 		data, err = execLog(j.req.cmd.repoPath, cmd)
 	case "checkout":
-		data, err = execCheckout(j.req.cmd.repoPath, cmd)
+		data, err = execCheckout(ctx, j, cmd)
 	case "reset":
-		data, err = execReset(j.req.cmd.repoPath, cmd)
+		data, err = execReset(ctx, j, cmd)
 	case "restore":
-		data, err = execRestore(j.req.cmd.repoPath, cmd)
+		data, err = execRestore(ctx, j, cmd)
 	case "clean":
 		data, err = execClean(j.req.cmd.repoPath)
 	case "branch":
@@ -800,12 +800,17 @@ func execClone(ctx context.Context, j *job, cmd gitCommand) (map[string]any, err
 	if err != nil {
 		return nil, err
 	}
+	lfsData, err := fetchLFS(ctx, j, targetPath, "origin", true, false)
+	if err != nil {
+		return nil, err
+	}
 	head, _ := repo.Head()
 	data := hashData(head)
 	if data == nil {
 		data = map[string]any{}
 	}
 	data["path"] = targetPath
+	data["lfs"] = lfsData
 	return data, nil
 }
 
@@ -856,6 +861,9 @@ func execStatus(repoPath string) (map[string]any, error) {
 	}
 	status, err := worktree.Status()
 	if err != nil {
+		return nil, err
+	}
+	if err := normalizeLFSStatus(repoPath, status); err != nil {
 		return nil, err
 	}
 	files := make([]map[string]string, 0, len(status))
@@ -984,7 +992,8 @@ func execAdd(repoPath string, cmd gitCommand) (map[string]any, error) {
 		if err := worktree.AddWithOptions(&git.AddOptions{All: true}); err != nil {
 			return nil, err
 		}
-		return map[string]any{"paths": []string{"."}}, nil
+		lfsPaths, err := cleanLFSIndex(repoPath)
+		return map[string]any{"paths": []string{"."}, "lfs": lfsPaths}, err
 	}
 	for _, p := range cmd.paths {
 		if p == "." {
@@ -1003,7 +1012,8 @@ func execAdd(repoPath string, cmd gitCommand) (map[string]any, error) {
 			return nil, err
 		}
 	}
-	return map[string]any{"paths": cmd.paths}, nil
+	lfsPaths, err := cleanLFSIndex(repoPath)
+	return map[string]any{"paths": cmd.paths, "lfs": lfsPaths}, err
 }
 
 func execRm(repoPath string, cmd gitCommand) (map[string]any, error) {
@@ -1030,6 +1040,15 @@ func execCommit(repoPath string, cmd gitCommand) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cmd.all {
+		if err := worktree.AddWithOptions(&git.AddOptions{All: true}); err != nil {
+			return nil, err
+		}
+		if _, err := cleanLFSIndex(repoPath); err != nil {
+			return nil, err
+		}
+		cmd.all = false
+	}
 	author := &object.Signature{
 		Name:  firstNonEmpty(cmd.authorName, "Dora"),
 		Email: firstNonEmpty(cmd.authorEmail, "dora@example.com"),
@@ -1053,6 +1072,16 @@ func execPull(ctx context.Context, j *job, cmd gitCommand) (map[string]any, erro
 	if err != nil {
 		return nil, err
 	}
+	dehydrated, err := dehydrateCleanLFSFiles(j.req.cmd.repoPath)
+	if err != nil {
+		return nil, err
+	}
+	applied := false
+	defer func() {
+		if !applied {
+			_ = rehydrateLFSFiles(j.req.cmd.repoPath, dehydrated)
+		}
+	}()
 	opts := &git.PullOptions{
 		RemoteName: cmd.remote,
 		Force:      cmd.force,
@@ -1065,9 +1094,16 @@ func execPull(ctx context.Context, j *job, cmd gitCommand) (map[string]any, erro
 	}
 	err = worktree.PullContext(ctx, opts)
 	if errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return map[string]any{"upToDate": true}, nil
+		lfsData, lfsErr := fetchLFS(ctx, j, j.req.cmd.repoPath, cmd.remote, true, false)
+		applied = lfsErr == nil
+		return map[string]any{"upToDate": true, "lfs": lfsData}, lfsErr
 	}
-	return nil, err
+	if err != nil {
+		return nil, err
+	}
+	applied = true
+	lfsData, err := fetchLFS(ctx, j, j.req.cmd.repoPath, cmd.remote, true, false)
+	return map[string]any{"lfs": lfsData}, err
 }
 
 func execFetch(ctx context.Context, j *job, cmd gitCommand) (map[string]any, error) {
@@ -1084,9 +1120,14 @@ func execFetch(ctx context.Context, j *job, cmd gitCommand) (map[string]any, err
 		Auth:       authMethod(j.req.cmd.options),
 	})
 	if errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return map[string]any{"upToDate": true}, nil
+		lfsData, lfsErr := fetchLFS(ctx, j, j.req.cmd.repoPath, cmd.remote, false, true)
+		return map[string]any{"upToDate": true, "lfs": lfsData}, lfsErr
 	}
-	return nil, err
+	if err != nil {
+		return nil, err
+	}
+	lfsData, err := fetchLFS(ctx, j, j.req.cmd.repoPath, cmd.remote, false, true)
+	return map[string]any{"lfs": lfsData}, err
 }
 
 func execPush(ctx context.Context, j *job, cmd gitCommand) (map[string]any, error) {
@@ -1096,6 +1137,10 @@ func execPush(ctx context.Context, j *job, cmd gitCommand) (map[string]any, erro
 	}
 	if isUnbornHead(repo) {
 		return nil, errors.New("cannot push before first commit")
+	}
+	lfsData, err := pushLFS(ctx, j, j.req.cmd.repoPath, cmd.remote, cmd.branch)
+	if err != nil {
+		return nil, err
 	}
 	opts := &git.PushOptions{
 		RemoteName: cmd.remote,
@@ -1109,7 +1154,7 @@ func execPush(ctx context.Context, j *job, cmd gitCommand) (map[string]any, erro
 	}
 	err = repo.PushContext(ctx, opts)
 	if errors.Is(err, git.NoErrAlreadyUpToDate) {
-		data := map[string]any{"upToDate": true}
+		data := map[string]any{"upToDate": true, "lfs": lfsData}
 		if cmd.setUpstream {
 			upstream, err := setPushUpstream(repo, cmd)
 			if err != nil {
@@ -1122,7 +1167,7 @@ func execPush(ctx context.Context, j *job, cmd gitCommand) (map[string]any, erro
 	if err != nil {
 		return nil, err
 	}
-	data := map[string]any{}
+	data := map[string]any{"lfs": lfsData}
 	if cmd.setUpstream {
 		upstream, err := setPushUpstream(repo, cmd)
 		if err != nil {
@@ -1265,11 +1310,22 @@ func commitChangedFiles(commit *object.Commit) ([]map[string]any, error) {
 
 var storerStop = errors.New("stop commit iteration")
 
-func execCheckout(repoPath string, cmd gitCommand) (map[string]any, error) {
+func execCheckout(ctx context.Context, j *job, cmd gitCommand) (map[string]any, error) {
+	repoPath := j.req.cmd.repoPath
 	repo, worktree, err := openWorktree(repoPath)
 	if err != nil {
 		return nil, err
 	}
+	dehydrated, err := dehydrateCleanLFSFiles(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	applied := false
+	defer func() {
+		if !applied {
+			_ = rehydrateLFSFiles(repoPath, dehydrated)
+		}
+	}()
 	if cmd.create && isUnbornHead(repo) {
 		refName := plumbingBranch(cmd.branch)
 		if _, err := repo.Reference(refName, false); err == nil {
@@ -1317,6 +1373,7 @@ func execCheckout(repoPath string, cmd gitCommand) (map[string]any, error) {
 	if err := worktree.Checkout(opts); err != nil {
 		return nil, err
 	}
+	applied = true
 	if cmd.create && cmd.target != "" {
 		if _, remote, remoteBranch, err := checkoutStartPoint(repo, cmd.target); err == nil && remote != "" && remoteBranch != "" {
 			if _, err := setBranchUpstream(repo, cmd.branch, remote, remoteBranch); err != nil {
@@ -1325,7 +1382,16 @@ func execCheckout(repoPath string, cmd gitCommand) (map[string]any, error) {
 		}
 	}
 	head, _ := repo.Head()
-	return hashData(head), nil
+	data := hashData(head)
+	lfsData, err := fetchLFS(ctx, j, repoPath, firstRemoteName(repo), true, false)
+	if err != nil {
+		return nil, err
+	}
+	if data == nil {
+		data = map[string]any{}
+	}
+	data["lfs"] = lfsData
+	return data, nil
 }
 
 func checkoutStartPoint(repo *git.Repository, target string) (plumbing.Hash, string, string, error) {
@@ -1351,7 +1417,8 @@ func checkoutStartPoint(repo *git.Repository, target string) (plumbing.Hash, str
 	return ref.Hash(), remote, branch, nil
 }
 
-func execReset(repoPath string, cmd gitCommand) (map[string]any, error) {
+func execReset(ctx context.Context, j *job, cmd gitCommand) (map[string]any, error) {
+	repoPath := j.req.cmd.repoPath
 	repo, worktree, err := openWorktree(repoPath)
 	if err != nil {
 		return nil, err
@@ -1364,10 +1431,22 @@ func execReset(repoPath string, cmd gitCommand) (map[string]any, error) {
 		return nil, err
 	}
 	head, _ := repo.Head()
-	return hashData(head), nil
+	data := hashData(head)
+	if cmd.resetMode == git.HardReset {
+		lfsData, err := fetchLFS(ctx, j, repoPath, firstRemoteName(repo), true, false)
+		if err != nil {
+			return nil, err
+		}
+		if data == nil {
+			data = map[string]any{}
+		}
+		data["lfs"] = lfsData
+	}
+	return data, nil
 }
 
-func execRestore(repoPath string, cmd gitCommand) (map[string]any, error) {
+func execRestore(ctx context.Context, j *job, cmd gitCommand) (map[string]any, error) {
+	repoPath := j.req.cmd.repoPath
 	repo, worktree, err := openWorktree(repoPath)
 	if err != nil {
 		return nil, err
@@ -1409,7 +1488,8 @@ func execRestore(repoPath string, cmd gitCommand) (map[string]any, error) {
 			return nil, err
 		}
 	}
-	return map[string]any{"paths": cmd.paths, "staged": false, "worktree": true}, nil
+	lfsData, err := fetchLFS(ctx, j, repoPath, firstRemoteName(repo), true, false)
+	return map[string]any{"paths": cmd.paths, "staged": false, "worktree": true, "lfs": lfsData}, err
 }
 
 func unstageFromUnbornIndex(repo *git.Repository, paths []string) error {
@@ -1672,7 +1752,8 @@ func execMv(repoPath string, cmd gitCommand) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"from": from, "to": to, "hash": hash.String()}, nil
+	lfsPaths, err := cleanLFSIndex(repoPath)
+	return map[string]any{"from": from, "to": to, "hash": hash.String(), "lfs": lfsPaths}, err
 }
 
 func openWorktree(repoPath string) (*git.Repository, *git.Worktree, error) {
