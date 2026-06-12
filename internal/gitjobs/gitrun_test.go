@@ -218,6 +218,180 @@ func TestGitRunLocalWorkflow(t *testing.T) {
 	}
 }
 
+func TestGitRunShallowCloneStatus(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	parent := filepath.Join(root, "parent")
+	clonePath := filepath.Join(parent, "shallow")
+
+	sourceHead := initRepository(t, source, "README.md", "initial\n", "initial")
+	repo, worktree, err := openWorktree(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(source, "README.md"), "initial\nsecond\n")
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatal(err)
+	}
+	secondHash, err := worktree.Commit("second", commitOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondHash.String() == sourceHead {
+		t.Fatal("expected second commit")
+	}
+	if _, err := repo.Head(); err != nil {
+		t.Fatal(err)
+	}
+
+	clone := waitRun(t, parent, "git clone --depth 1 "+quoteArg(source)+" shallow", "")
+	if path := resultData(t, clone)["path"].(string); path != clonePath {
+		t.Fatalf("expected shallow clone path %q, got %q", clonePath, path)
+	}
+
+	status := resultData(t, waitRun(t, clonePath, "git status", ""))
+	if clean, _ := status["clean"].(bool); !clean {
+		t.Fatalf("expected clean shallow clone, got %#v", status)
+	}
+	branch := resultData(t, waitRun(t, clonePath, "git branch", ""))
+	if !containsNamedItem(branch["branches"], "master") {
+		t.Fatalf("expected shallow clone branch list to include master, got %#v", branch)
+	}
+	log := resultData(t, waitRun(t, clonePath, "git log -n 100", ""))
+	commits := log["commits"].([]any)
+	if len(commits) != 1 {
+		t.Fatalf("expected shallow clone log to include only latest commit, got %#v", log)
+	}
+	shallowTip := commits[0].(map[string]any)
+	if shallowTip["hash"] != secondHash.String() {
+		t.Fatalf("expected shallow tip to be second commit, got %#v", shallowTip)
+	}
+	if !containsCommitFile(shallowTip["files"], "README.md", "A") {
+		t.Fatalf("expected shallow boundary commit to list README.md as added, got %#v", shallowTip["files"])
+	}
+	pathLog := resultData(t, waitRun(t, clonePath, "git log -n 100 -- README.md", ""))
+	if pathCommits := pathLog["commits"].([]any); len(pathCommits) != 1 || pathCommits[0].(map[string]any)["hash"] != secondHash.String() {
+		t.Fatalf("expected shallow path log to include boundary commit, got %#v", pathLog)
+	}
+	boundaryDiff := resultData(t, waitRun(t, clonePath, "git diff "+secondHash.String()+" -- README.md", ""))
+	if boundaryDiff["oldText"] != "" || boundaryDiff["newText"] != "initial\nsecond\n" {
+		t.Fatalf("unexpected shallow boundary diff content: %#v", boundaryDiff)
+	}
+
+	writeFile(t, filepath.Join(source, "README.md"), "initial\nsecond\nthird\n")
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatal(err)
+	}
+	thirdHash, err := worktree.Commit("third", commitOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pull := resultData(t, waitRun(t, clonePath, "git pull origin master", ""))
+	if pull["lfs"] == nil {
+		t.Fatalf("expected shallow pull to return LFS metadata, got %#v", pull)
+	}
+	content, err := os.ReadFile(filepath.Join(clonePath, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "initial\nsecond\nthird\n" {
+		t.Fatalf("expected shallow pull to update README.md, got %q", string(content))
+	}
+
+	writeFile(t, filepath.Join(clonePath, "local.txt"), "one\n")
+	waitRun(t, clonePath, "git add local.txt", "")
+	localOne := resultData(t, waitRun(t, clonePath, `git commit -m "local one"`, ""))["commit"].(string)
+	writeFile(t, filepath.Join(clonePath, "local.txt"), "one\ntwo\n")
+	waitRun(t, clonePath, "git add local.txt", "")
+	localTwo := resultData(t, waitRun(t, clonePath, `git commit -m "local two"`, ""))["commit"].(string)
+	log = resultData(t, waitRun(t, clonePath, "git log -n 100", ""))
+	commits = log["commits"].([]any)
+	if len(commits) != 3 {
+		t.Fatalf("expected shallow clone log to include local commits and shallow tip, got %#v", log)
+	}
+	if commits[0].(map[string]any)["hash"] != localTwo || commits[1].(map[string]any)["hash"] != localOne {
+		t.Fatalf("expected local commits before shallow tip, got %#v", commits)
+	}
+	fetch := resultData(t, waitRun(t, clonePath, "git fetch origin", ""))
+	if fetch["lfs"] == nil {
+		t.Fatalf("expected shallow fetch to return LFS metadata, got %#v", fetch)
+	}
+	writeFile(t, filepath.Join(source, "README.md"), "initial\nsecond\nthird\nfourth\n")
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatal(err)
+	}
+	fourthHash, err := worktree.Commit("fourth", commitOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetch = resultData(t, waitRun(t, clonePath, "git fetch origin", ""))
+	if fetch["lfs"] == nil {
+		t.Fatalf("expected updated shallow fetch to return LFS metadata, got %#v", fetch)
+	}
+	branch = resultData(t, waitRun(t, clonePath, "git branch", ""))
+	if !containsBranchHash(branch["branches"], "origin", "master", fourthHash.String()) {
+		t.Fatalf("expected origin/master to move to fourth commit, got %#v", branch)
+	}
+	if thirdHash.String() == fourthHash.String() {
+		t.Fatal("expected source commits to differ")
+	}
+}
+
+func TestGitRunShallowClonePush(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	seed := filepath.Join(root, "seed")
+	parent := filepath.Join(root, "parent")
+	clonePath := filepath.Join(parent, "shallow")
+	verifyParent := filepath.Join(root, "verify-parent")
+	verifyPath := filepath.Join(verifyParent, "verify")
+
+	if _, err := git.PlainInit(remote, true); err != nil {
+		t.Fatal(err)
+	}
+	seedRepo, err := git.PlainInit(seed, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedRepo.CreateRemote(&config.RemoteConfig{Name: "origin", URLs: []string{remote}}); err != nil {
+		t.Fatal(err)
+	}
+	seedWorktree, err := seedRepo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(seed, "README.md"), "initial\n")
+	if _, err := seedWorktree.Add("README.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedWorktree.Commit("initial", commitOptions()); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(seed, "README.md"), "initial\nsecond\n")
+	if _, err := seedWorktree.Add("README.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedWorktree.Commit("second", commitOptions()); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedRepo.Push(&git.PushOptions{RemoteName: "origin"}); err != nil {
+		t.Fatal(err)
+	}
+
+	waitRun(t, parent, "git clone --depth 1 "+quoteArg(remote)+" shallow", "")
+	writeFile(t, filepath.Join(clonePath, "local.txt"), "local\n")
+	waitRun(t, clonePath, "git add local.txt", "")
+	localCommit := resultData(t, waitRun(t, clonePath, `git commit -m "local commit"`, ""))["commit"].(string)
+	waitRun(t, clonePath, "git push origin master", "")
+
+	waitRun(t, verifyParent, "git clone "+quoteArg(remote)+" verify", "")
+	log := resultData(t, waitRun(t, verifyPath, "git log -n 1", ""))
+	commits := log["commits"].([]any)
+	if len(commits) != 1 || commits[0].(map[string]any)["hash"] != localCommit {
+		t.Fatalf("expected pushed shallow clone commit at remote head, got %#v", log)
+	}
+}
+
 func TestGitRunPushAndPull(t *testing.T) {
 	root := t.TempDir()
 	remote := filepath.Join(root, "remote.git")
@@ -505,6 +679,23 @@ func containsRemoteBranch(value any, remote, name string) bool {
 			continue
 		}
 		if data["remote"] == remote && data["name"] == name {
+			return true
+		}
+	}
+	return false
+}
+
+func containsBranchHash(value any, remote, name, hash string) bool {
+	items, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		data, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if data["remote"] == remote && data["name"] == name && data["hash"] == hash {
 			return true
 		}
 	}

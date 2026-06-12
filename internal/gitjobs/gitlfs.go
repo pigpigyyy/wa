@@ -390,23 +390,41 @@ func lfsPointersAtHead(repo *git.Repository) (map[string]lfsPointer, error) {
 }
 
 func lfsPointersReachable(repo *git.Repository, hash plumbing.Hash) (map[string]lfsPointer, error) {
+	result := map[string]lfsPointer{}
 	iter, err := repo.Log(&git.LogOptions{From: hash})
 	if err != nil {
-		return nil, err
+		if errors.Is(err, plumbing.ErrObjectNotFound) {
+			return mergeLFSPointersAtCommit(repo, result, hash)
+		}
+		return result, err
 	}
 	defer iter.Close()
-	result := map[string]lfsPointer{}
+	visited := false
 	err = iter.ForEach(func(commit *object.Commit) error {
-		pointers, err := lfsPointersAtCommit(repo, commit.Hash)
-		if err != nil {
+		visited = true
+		if _, err := mergeLFSPointersAtCommit(repo, result, commit.Hash); err != nil {
 			return err
-		}
-		for _, pointer := range pointers {
-			result[pointer.OID] = pointer
 		}
 		return nil
 	})
+	if errors.Is(err, plumbing.ErrObjectNotFound) {
+		if visited {
+			return result, nil
+		}
+		return mergeLFSPointersAtCommit(repo, result, hash)
+	}
 	return result, err
+}
+
+func mergeLFSPointersAtCommit(repo *git.Repository, result map[string]lfsPointer, hash plumbing.Hash) (map[string]lfsPointer, error) {
+	pointers, err := lfsPointersAtCommit(repo, hash)
+	if err != nil {
+		return result, err
+	}
+	for _, pointer := range pointers {
+		result[pointer.OID] = pointer
+	}
+	return result, nil
 }
 
 func lfsPointersForFetch(repo *git.Repository, remote string) (map[string]lfsPointer, error) {

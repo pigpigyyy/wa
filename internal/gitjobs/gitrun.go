@@ -1,6 +1,7 @@
 package gitjobs
 
 import (
+	"container/heap"
 	"context"
 	"encoding/json"
 	"errors"
@@ -950,6 +951,9 @@ func execCommitFileDiff(repo *git.Repository, commitHash, path string) (map[stri
 	var parent *object.Commit
 	parentIter := commit.Parents()
 	parent, err = parentIter.Next()
+	if errors.Is(err, plumbing.ErrObjectNotFound) {
+		err = io.EOF
+	}
 	if err != nil && err != io.EOF {
 		return nil, err
 	}
@@ -1068,7 +1072,7 @@ func execCommit(repoPath string, cmd gitCommand) (map[string]any, error) {
 }
 
 func execPull(ctx context.Context, j *job, cmd gitCommand) (map[string]any, error) {
-	_, worktree, err := openWorktree(j.req.cmd.repoPath)
+	repo, worktree, err := openWorktree(j.req.cmd.repoPath)
 	if err != nil {
 		return nil, err
 	}
@@ -1088,6 +1092,11 @@ func execPull(ctx context.Context, j *job, cmd gitCommand) (map[string]any, erro
 		Progress:   progressWriter{job: j},
 		Auth:       authMethod(j.req.cmd.options),
 	}
+	depth, err := fetchDepth(repo, cmd.depth)
+	if err != nil {
+		return nil, err
+	}
+	opts.Depth = depth
 	if cmd.branch != "" {
 		opts.ReferenceName = plumbingBranch(cmd.branch)
 		opts.SingleBranch = true
@@ -1111,9 +1120,13 @@ func execFetch(ctx context.Context, j *job, cmd gitCommand) (map[string]any, err
 	if err != nil {
 		return nil, err
 	}
+	depth, err := fetchDepth(repo, cmd.depth)
+	if err != nil {
+		return nil, err
+	}
 	err = repo.FetchContext(ctx, &git.FetchOptions{
 		RemoteName: cmd.remote,
-		Depth:      cmd.depth,
+		Depth:      depth,
 		Force:      cmd.force,
 		Prune:      cmd.all,
 		Progress:   progressWriter{job: j},
@@ -1128,6 +1141,20 @@ func execFetch(ctx context.Context, j *job, cmd gitCommand) (map[string]any, err
 	}
 	lfsData, err := fetchLFS(ctx, j, j.req.cmd.repoPath, cmd.remote, false, true)
 	return map[string]any{"lfs": lfsData}, err
+}
+
+func fetchDepth(repo *git.Repository, requested int) (int, error) {
+	if requested != 0 {
+		return requested, nil
+	}
+	shallow, err := repo.Storer.Shallow()
+	if err != nil {
+		return 0, nil
+	}
+	if len(shallow) == 0 {
+		return 0, nil
+	}
+	return 1, nil
 }
 
 func execPush(ctx context.Context, j *job, cmd gitCommand) (map[string]any, error) {
@@ -1217,64 +1244,151 @@ func execLog(repoPath string, cmd gitCommand) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	opts := &git.LogOptions{Order: git.LogOrderCommitterTime}
-	if len(cmd.paths) != 0 {
-		path := cmd.paths[0]
-		opts.FileName = &path
-	}
-	iter, err := repo.Log(opts)
+	head, err := repo.Head()
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return map[string]any{"commits": []map[string]any{}}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	defer iter.Close()
-	var commits []map[string]any
-	limit := cmd.limit
-	err = iter.ForEach(func(c *object.Commit) error {
-		if limit <= 0 {
-			return storerStop
-		}
-		files, err := commitChangedFiles(c)
-		if err != nil {
-			return err
-		}
-		commits = append(commits, map[string]any{
-			"hash":    c.Hash.String(),
-			"message": strings.TrimSpace(c.Message),
-			"author":  c.Author.Name,
-			"email":   c.Author.Email,
-			"when":    c.Author.When.Format(time.RFC3339),
-			"files":   files,
-		})
-		limit--
-		return nil
-	})
-	if errors.Is(err, storerStop) {
-		err = nil
+	path := ""
+	if len(cmd.paths) != 0 {
+		path = cmd.paths[0]
 	}
+	commits, err := shallowAwareLog(repo, head.Hash(), cmd.limit, path)
 	return map[string]any{"commits": commits}, err
+}
+
+func shallowAwareLog(repo *git.Repository, from plumbing.Hash, limit int, path string) ([]map[string]any, error) {
+	shallowSet := map[plumbing.Hash]struct{}{}
+	if shallow, err := repo.Storer.Shallow(); err == nil {
+		for _, hash := range shallow {
+			shallowSet[hash] = struct{}{}
+		}
+	}
+	queue := &commitPriorityQueue{}
+	heap.Init(queue)
+	if err := pushCommit(repo, queue, from); err != nil {
+		if errors.Is(err, plumbing.ErrObjectNotFound) {
+			return []map[string]any{}, nil
+		}
+		return nil, err
+	}
+	seen := map[plumbing.Hash]struct{}{}
+	commits := []map[string]any{}
+	for queue.Len() != 0 && len(commits) < limit {
+		commit := heap.Pop(queue).(*object.Commit)
+		if _, ok := seen[commit.Hash]; ok {
+			continue
+		}
+		seen[commit.Hash] = struct{}{}
+		data, err := commitLogData(commit)
+		if err != nil {
+			return nil, err
+		}
+		if path == "" || commitLogDataTouchesPath(data, path) {
+			commits = append(commits, data)
+		}
+		if _, shallow := shallowSet[commit.Hash]; shallow {
+			continue
+		}
+		for _, parentHash := range commit.ParentHashes {
+			if _, ok := seen[parentHash]; ok {
+				continue
+			}
+			if err := pushCommit(repo, queue, parentHash); err != nil && !errors.Is(err, plumbing.ErrObjectNotFound) {
+				return nil, err
+			}
+		}
+	}
+	return commits, nil
+}
+
+func pushCommit(repo *git.Repository, queue *commitPriorityQueue, hash plumbing.Hash) error {
+	commit, err := repo.CommitObject(hash)
+	if err != nil {
+		return err
+	}
+	heap.Push(queue, commit)
+	return nil
+}
+
+type commitPriorityQueue []*object.Commit
+
+func (q commitPriorityQueue) Len() int {
+	return len(q)
+}
+
+func (q commitPriorityQueue) Less(i, j int) bool {
+	left := q[i]
+	right := q[j]
+	if left.Committer.When.Equal(right.Committer.When) {
+		return left.Hash.String() > right.Hash.String()
+	}
+	return left.Committer.When.After(right.Committer.When)
+}
+
+func (q commitPriorityQueue) Swap(i, j int) {
+	q[i], q[j] = q[j], q[i]
+}
+
+func (q *commitPriorityQueue) Push(x any) {
+	*q = append(*q, x.(*object.Commit))
+}
+
+func (q *commitPriorityQueue) Pop() any {
+	old := *q
+	n := len(old)
+	item := old[n-1]
+	*q = old[:n-1]
+	return item
+}
+
+func commitLogDataTouchesPath(data map[string]any, path string) bool {
+	files, ok := data["files"].([]map[string]any)
+	if !ok {
+		return false
+	}
+	for _, file := range files {
+		filePath, ok := file["path"].(string)
+		if !ok {
+			continue
+		}
+		if filePath == path || strings.HasPrefix(filePath, path+"/") || strings.HasPrefix(path, filePath+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func commitLogData(commit *object.Commit) (map[string]any, error) {
+	files, err := commitChangedFiles(commit)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"hash":    commit.Hash.String(),
+		"message": strings.TrimSpace(commit.Message),
+		"author":  commit.Author.Name,
+		"email":   commit.Author.Email,
+		"when":    commit.Author.When.Format(time.RFC3339),
+		"files":   files,
+	}, nil
 }
 
 func commitChangedFiles(commit *object.Commit) ([]map[string]any, error) {
 	parentIter := commit.Parents()
 	parent, err := parentIter.Next()
+	if errors.Is(err, plumbing.ErrObjectNotFound) {
+		return commitTreeFiles(commit)
+	}
 	if err != nil && err != io.EOF {
 		return nil, err
 	}
-	var files []map[string]any
 	if parent == nil {
-		tree, err := commit.Tree()
-		if err != nil {
-			return nil, err
-		}
-		err = tree.Files().ForEach(func(file *object.File) error {
-			files = append(files, map[string]any{"path": file.Name, "status": "A"})
-			return nil
-		})
-		return files, err
+		return commitTreeFiles(commit)
 	}
+	var files []map[string]any
 	parentTree, err := parent.Tree()
 	if err != nil {
 		return nil, err
@@ -1308,7 +1422,18 @@ func commitChangedFiles(commit *object.Commit) ([]map[string]any, error) {
 	return files, nil
 }
 
-var storerStop = errors.New("stop commit iteration")
+func commitTreeFiles(commit *object.Commit) ([]map[string]any, error) {
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil, err
+	}
+	files := []map[string]any{}
+	err = tree.Files().ForEach(func(file *object.File) error {
+		files = append(files, map[string]any{"path": file.Name, "status": "A"})
+		return nil
+	})
+	return files, err
+}
 
 func execCheckout(ctx context.Context, j *job, cmd gitCommand) (map[string]any, error) {
 	repoPath := j.req.cmd.repoPath
